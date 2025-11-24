@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"golang.org/x/term"
 )
 
 var importCmd = &cobra.Command{
@@ -70,6 +71,18 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		clearDuplicateExternalRefs, _ := cmd.Flags().GetBool("clear-duplicate-external-refs")
 		orphanHandling, _ := cmd.Flags().GetString("orphan-handling")
 		force, _ := cmd.Flags().GetBool("force")
+
+		// Check if stdin is being used interactively (not piped)
+		if input == "" && term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprintf(os.Stderr, "Error: No input specified.\n\n")
+			fmt.Fprintf(os.Stderr, "Usage:\n")
+			fmt.Fprintf(os.Stderr, "  bd import -i .beads/beads.jsonl          # Import from file\n")
+			fmt.Fprintf(os.Stderr, "  bd import -i .beads/beads.jsonl --dry-run # Preview changes\n")
+			fmt.Fprintf(os.Stderr, "  cat data.jsonl | bd import               # Import from pipe\n")
+			fmt.Fprintf(os.Stderr, "  bd sync --import-only                    # Import latest JSONL\n\n")
+			fmt.Fprintf(os.Stderr, "For more information, run: bd import --help\n")
+			os.Exit(1)
+		}
 
 		// Open input
 		in := os.Stdin
@@ -324,14 +337,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 					// Non-fatal warning (see above comment about graceful degradation)
 					debug.Logf("Warning: failed to update last_import_time: %v", err)
 				}
-				// Store mtime for fast-path optimization in hasJSONLChanged (bd-3bg)
-				if jsonlInfo, statErr := os.Stat(input); statErr == nil {
-					mtimeStr := fmt.Sprintf("%d", jsonlInfo.ModTime().Unix())
-					if err := store.SetMetadata(ctx, "last_import_mtime", mtimeStr); err != nil {
-						// Non-fatal warning (see above comment about graceful degradation)
-						debug.Logf("Warning: failed to update last_import_mtime: %v", err)
-					}
-				}
+				// Note: mtime tracking removed in bd-v0y fix (git doesn't preserve mtime)
 			} else {
 				debug.Logf("Warning: failed to read JSONL for hash update: %v", err)
 			}
@@ -359,6 +365,16 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			fmt.Fprintf(os.Stderr, ", %d issues remapped", len(result.IDMapping))
 		}
 		fmt.Fprintf(os.Stderr, "\n")
+
+		// Print skipped dependencies summary if any
+		if len(result.SkippedDependencies) > 0 {
+			fmt.Fprintf(os.Stderr, "\n⚠️  Warning: Skipped %d dependencies due to missing references:\n", len(result.SkippedDependencies))
+			for _, dep := range result.SkippedDependencies {
+				fmt.Fprintf(os.Stderr, "  - %s\n", dep)
+			}
+			fmt.Fprintf(os.Stderr, "\nThis can happen after merges that delete issues referenced by other issues.\n")
+			fmt.Fprintf(os.Stderr, "The import continued successfully - you may want to review the skipped dependencies.\n")
+		}
 
 		// Print force message if metadata was updated despite no changes
 		if force && result.Created == 0 && result.Updated == 0 && len(result.IDMapping) == 0 {

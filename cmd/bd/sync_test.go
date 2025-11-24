@@ -32,20 +32,8 @@ func TestIsGitRepo_NotInGitRepo(t *testing.T) {
 }
 
 func TestGitHasUpstream_NoUpstream(t *testing.T) {
-	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	// Create a fresh git repo without upstream
-	os.Chdir(tmpDir)
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
-
-	// Create initial commit
-	os.WriteFile("test.txt", []byte("test"), 0644)
-	exec.Command("git", "add", "test.txt").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
+	_, cleanup := setupGitRepo(t)
+	defer cleanup()
 
 	// Should not have upstream
 	if gitHasUpstream() {
@@ -55,23 +43,10 @@ func TestGitHasUpstream_NoUpstream(t *testing.T) {
 
 func TestGitHasChanges_NoFile(t *testing.T) {
 	ctx := context.Background()
-	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
+	_, cleanup := setupGitRepo(t)
+	defer cleanup()
 
-	// Create a git repo
-	os.Chdir(tmpDir)
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
-
-	// Create and commit a file
-	testFile := filepath.Join(tmpDir, "test.txt")
-	os.WriteFile(testFile, []byte("original"), 0644)
-	exec.Command("git", "add", "test.txt").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
-
-	// Check - should have no changes
+	// Check - should have no changes (test.txt was committed by setupGitRepo)
 	hasChanges, err := gitHasChanges(ctx, "test.txt")
 	if err != nil {
 		t.Fatalf("gitHasChanges() error = %v", err)
@@ -83,23 +58,11 @@ func TestGitHasChanges_NoFile(t *testing.T) {
 
 func TestGitHasChanges_ModifiedFile(t *testing.T) {
 	ctx := context.Background()
-	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	// Create a git repo
-	os.Chdir(tmpDir)
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
-
-	// Create and commit a file
-	testFile := filepath.Join(tmpDir, "test.txt")
-	os.WriteFile(testFile, []byte("original"), 0644)
-	exec.Command("git", "add", "test.txt").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
+	tmpDir, cleanup := setupGitRepo(t)
+	defer cleanup()
 
 	// Modify the file
+	testFile := filepath.Join(tmpDir, "test.txt")
 	os.WriteFile(testFile, []byte("modified"), 0644)
 
 	// Check - should have changes
@@ -113,20 +76,8 @@ func TestGitHasChanges_ModifiedFile(t *testing.T) {
 }
 
 func TestGitHasUnmergedPaths_CleanRepo(t *testing.T) {
-	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	// Create a git repo
-	os.Chdir(tmpDir)
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
-
-	// Create initial commit
-	os.WriteFile("test.txt", []byte("test"), 0644)
-	exec.Command("git", "add", "test.txt").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
+	_, cleanup := setupGitRepo(t)
+	defer cleanup()
 
 	// Should not have unmerged paths
 	hasUnmerged, err := gitHasUnmergedPaths()
@@ -140,23 +91,11 @@ func TestGitHasUnmergedPaths_CleanRepo(t *testing.T) {
 
 func TestGitCommit_Success(t *testing.T) {
 	ctx := context.Background()
-	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	// Create a git repo
-	os.Chdir(tmpDir)
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
-
-	// Create initial commit
-	os.WriteFile("initial.txt", []byte("initial"), 0644)
-	exec.Command("git", "add", "initial.txt").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
+	_, cleanup := setupGitRepo(t)
+	defer cleanup()
 
 	// Create a new file
-	testFile := "test.txt"
+	testFile := "new.txt"
 	os.WriteFile(testFile, []byte("content"), 0644)
 
 	// Commit the file
@@ -177,23 +116,11 @@ func TestGitCommit_Success(t *testing.T) {
 
 func TestGitCommit_AutoMessage(t *testing.T) {
 	ctx := context.Background()
-	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	// Create a git repo
-	os.Chdir(tmpDir)
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
-
-	// Create initial commit
-	os.WriteFile("initial.txt", []byte("initial"), 0644)
-	exec.Command("git", "add", "initial.txt").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
+	_, cleanup := setupGitRepo(t)
+	defer cleanup()
 
 	// Create a new file
-	testFile := "test.txt"
+	testFile := "new.txt"
 	os.WriteFile(testFile, []byte("content"), 0644)
 
 	// Commit with auto-generated message (empty string)
@@ -275,20 +202,8 @@ not valid json
 
 func TestGetCurrentBranch(t *testing.T) {
 	ctx := context.Background()
-	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	// Create a git repo
-	os.Chdir(tmpDir)
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
-
-	// Create initial commit
-	os.WriteFile("test.txt", []byte("test"), 0644)
-	exec.Command("git", "add", "test.txt").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
+	_, cleanup := setupGitRepo(t)
+	defer cleanup()
 
 	// Get current branch
 	branch, err := getCurrentBranch(ctx)
@@ -304,20 +219,8 @@ func TestGetCurrentBranch(t *testing.T) {
 
 func TestMergeSyncBranch_NoSyncBranchConfigured(t *testing.T) {
 	ctx := context.Background()
-	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	// Create a git repo
-	os.Chdir(tmpDir)
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
-
-	// Create initial commit
-	os.WriteFile("test.txt", []byte("test"), 0644)
-	exec.Command("git", "add", "test.txt").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
+	_, cleanup := setupGitRepo(t)
+	defer cleanup()
 
 	// Try to merge without sync.branch configured (or database)
 	err := mergeSyncBranch(ctx, false)
@@ -332,20 +235,8 @@ func TestMergeSyncBranch_NoSyncBranchConfigured(t *testing.T) {
 
 func TestMergeSyncBranch_OnSyncBranch(t *testing.T) {
 	ctx := context.Background()
-	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	// Create a git repo
-	os.Chdir(tmpDir)
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
-
-	// Create initial commit on main
-	os.WriteFile("test.txt", []byte("test"), 0644)
-	exec.Command("git", "add", "test.txt").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
+	tmpDir, cleanup := setupGitRepo(t)
+	defer cleanup()
 
 	// Create sync branch
 	exec.Command("git", "checkout", "-b", "beads-metadata").Run()
@@ -363,20 +254,8 @@ func TestMergeSyncBranch_OnSyncBranch(t *testing.T) {
 }
 
 func TestMergeSyncBranch_DirtyWorkingTree(t *testing.T) {
-	tmpDir := t.TempDir()
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-
-	// Create a git repo
-	os.Chdir(tmpDir)
-	exec.Command("git", "init").Run()
-	exec.Command("git", "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "config", "user.name", "Test User").Run()
-
-	// Create initial commit
-	os.WriteFile("test.txt", []byte("test"), 0644)
-	exec.Command("git", "add", "test.txt").Run()
-	exec.Command("git", "commit", "-m", "initial").Run()
+	_, cleanup := setupGitRepo(t)
+	defer cleanup()
 
 	// Create uncommitted changes
 	os.WriteFile("test.txt", []byte("modified"), 0644)
@@ -439,5 +318,116 @@ func TestGetSyncBranch_EnvOverridesDB(t *testing.T) {
 	}
 	if branch != "env-branch" {
 		t.Errorf("getSyncBranch() = %q, want %q (env override)", branch, "env-branch")
+	}
+}
+
+func TestIsInRebase_NotInRebase(t *testing.T) {
+	_, cleanup := setupGitRepo(t)
+	defer cleanup()
+
+	// Should not be in rebase
+	if isInRebase() {
+		t.Error("expected false when not in rebase")
+	}
+}
+
+func TestIsInRebase_InRebase(t *testing.T) {
+	tmpDir, cleanup := setupGitRepo(t)
+	defer cleanup()
+
+	// Simulate rebase by creating rebase-merge directory
+	os.MkdirAll(filepath.Join(tmpDir, ".git", "rebase-merge"), 0755)
+
+	// Should detect rebase
+	if !isInRebase() {
+		t.Error("expected true when .git/rebase-merge exists")
+	}
+}
+
+func TestIsInRebase_InRebaseApply(t *testing.T) {
+	tmpDir, cleanup := setupMinimalGitRepo(t)
+	defer cleanup()
+
+	// Simulate non-interactive rebase by creating rebase-apply directory
+	os.MkdirAll(filepath.Join(tmpDir, ".git", "rebase-apply"), 0755)
+
+	// Should detect rebase
+	if !isInRebase() {
+		t.Error("expected true when .git/rebase-apply exists")
+	}
+}
+
+func TestHasJSONLConflict_NoConflict(t *testing.T) {
+	_, cleanup := setupGitRepo(t)
+	defer cleanup()
+
+	// Should not have JSONL conflict
+	if hasJSONLConflict() {
+		t.Error("expected false when no conflicts")
+	}
+}
+
+func TestHasJSONLConflict_OnlyJSONLConflict(t *testing.T) {
+	tmpDir, cleanup := setupGitRepoWithBranch(t, "main")
+	defer cleanup()
+
+	// Create initial commit with beads.jsonl
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	os.MkdirAll(beadsDir, 0755)
+	os.WriteFile(filepath.Join(beadsDir, "beads.jsonl"), []byte(`{"id":"bd-1","title":"original"}`), 0644)
+	exec.Command("git", "add", ".").Run()
+	exec.Command("git", "commit", "-m", "add beads.jsonl").Run()
+
+	// Create a second commit on main (modify same issue)
+	os.WriteFile(filepath.Join(beadsDir, "beads.jsonl"), []byte(`{"id":"bd-1","title":"main-version"}`), 0644)
+	exec.Command("git", "add", ".").Run()
+	exec.Command("git", "commit", "-m", "main change").Run()
+
+	// Create a branch from the first commit
+	exec.Command("git", "checkout", "-b", "feature", "HEAD~1").Run()
+	os.WriteFile(filepath.Join(beadsDir, "beads.jsonl"), []byte(`{"id":"bd-1","title":"feature-version"}`), 0644)
+	exec.Command("git", "add", ".").Run()
+	exec.Command("git", "commit", "-m", "feature change").Run()
+
+	// Attempt rebase onto main (will conflict)
+	exec.Command("git", "rebase", "main").Run()
+
+	// Should detect JSONL conflict during rebase
+	if !hasJSONLConflict() {
+		t.Error("expected true when only beads.jsonl has conflict during rebase")
+	}
+}
+
+func TestHasJSONLConflict_MultipleConflicts(t *testing.T) {
+	tmpDir, cleanup := setupGitRepoWithBranch(t, "main")
+	defer cleanup()
+
+	// Create initial commit with beads.jsonl and another file
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	os.MkdirAll(beadsDir, 0755)
+	os.WriteFile(filepath.Join(beadsDir, "beads.jsonl"), []byte(`{"id":"bd-1","title":"original"}`), 0644)
+	os.WriteFile("other.txt", []byte("line1\nline2\nline3"), 0644)
+	exec.Command("git", "add", ".").Run()
+	exec.Command("git", "commit", "-m", "add initial files").Run()
+
+	// Create a second commit on main (modify both files)
+	os.WriteFile(filepath.Join(beadsDir, "beads.jsonl"), []byte(`{"id":"bd-1","title":"main-version"}`), 0644)
+	os.WriteFile("other.txt", []byte("line1\nmain-version\nline3"), 0644)
+	exec.Command("git", "add", ".").Run()
+	exec.Command("git", "commit", "-m", "main change").Run()
+
+	// Create a branch from the first commit
+	exec.Command("git", "checkout", "-b", "feature", "HEAD~1").Run()
+	os.WriteFile(filepath.Join(beadsDir, "beads.jsonl"), []byte(`{"id":"bd-1","title":"feature-version"}`), 0644)
+	os.WriteFile("other.txt", []byte("line1\nfeature-version\nline3"), 0644)
+	exec.Command("git", "add", ".").Run()
+	exec.Command("git", "commit", "-m", "feature change").Run()
+
+	// Attempt rebase (will conflict on both files)
+	exec.Command("git", "rebase", "main").Run()
+
+	// Should NOT auto-resolve when multiple files conflict
+	if hasJSONLConflict() {
+		t.Error("expected false when multiple files have conflicts (should not auto-resolve)")
 	}
 }

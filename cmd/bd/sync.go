@@ -123,22 +123,27 @@ Use --merge to merge the sync branch back to main branch.`,
 			os.Exit(1)
 		}
 
-		// Step 1: Export pending changes
+		// Step 1: Export pending changes (but check for stale DB first)
 		if dryRun {
 			fmt.Println("→ [DRY RUN] Would export pending changes to JSONL")
 		} else {
-			// Smart conflict resolution: if JSONL content changed, auto-import first
-			// Use content-based check (not mtime) to avoid git resurrection bug (bd-khnb)
+			// ZFC safety check (bd-l0r): if DB significantly diverges from JSONL,
+			// force import first to sync with JSONL source of truth
 			if err := ensureStoreActive(); err == nil && store != nil {
-				// Use getRepoKeyForPath for multi-repo support (bd-ar2.10, bd-ar2.11)
-			repoKey := getRepoKeyForPath(jsonlPath)
-			if hasJSONLChanged(ctx, store, jsonlPath, repoKey) {
-					fmt.Println("→ JSONL content changed, importing first...")
-					if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
-						fmt.Fprintf(os.Stderr, "Error auto-importing: %v\n", err)
-						os.Exit(1)
+				dbCount, err := countDBIssuesFast(ctx, store)
+				if err == nil {
+					jsonlCount, err := countIssuesInJSONL(jsonlPath)
+					if err == nil && jsonlCount > 0 && dbCount > jsonlCount {
+						divergence := float64(dbCount-jsonlCount) / float64(jsonlCount)
+						if divergence > 0.5 { // >50% more issues in DB than JSONL
+							fmt.Printf("→ DB has %d issues but JSONL has %d (stale DB detected)\n", dbCount, jsonlCount)
+							fmt.Println("→ Importing JSONL first (ZFC)...")
+							if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
+								fmt.Fprintf(os.Stderr, "Error importing (ZFC): %v\n", err)
+								os.Exit(1)
+							}
+						}
 					}
-					fmt.Println("✓ Auto-import complete")
 				}
 			}
 
@@ -204,19 +209,49 @@ Use --merge to merge the sync branch back to main branch.`,
 
 				fmt.Println("→ Pulling from remote...")
 				if err := gitPull(ctx); err != nil {
-					fmt.Fprintf(os.Stderr, "Error pulling: %v\n", err)
+					// Check if it's a rebase conflict on beads.jsonl that we can auto-resolve
+					if isInRebase() && hasJSONLConflict() {
+						fmt.Println("→ Auto-resolving JSONL merge conflict...")
 
-					// Check if this looks like a merge driver failure
-					errStr := err.Error()
-					if strings.Contains(errStr, "merge driver") ||
-					   strings.Contains(errStr, "no such file or directory") ||
-					   strings.Contains(errStr, "MERGE DRIVER INVOKED") {
-						fmt.Fprintf(os.Stderr, "\nThis may be caused by an incorrect merge driver configuration.\n")
-						fmt.Fprintf(os.Stderr, "Fix: bd doctor --fix\n\n")
+						// Export clean JSONL from DB (database is source of truth)
+						if exportErr := exportToJSONL(ctx, jsonlPath); exportErr != nil {
+							fmt.Fprintf(os.Stderr, "Error: failed to export for conflict resolution: %v\n", exportErr)
+							fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+							os.Exit(1)
+						}
+
+						// Mark conflict as resolved
+						addCmd := exec.CommandContext(ctx, "git", "add", jsonlPath)
+						if addErr := addCmd.Run(); addErr != nil {
+							fmt.Fprintf(os.Stderr, "Error: failed to mark conflict resolved: %v\n", addErr)
+							fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+							os.Exit(1)
+						}
+
+						// Continue rebase
+						if continueErr := runGitRebaseContinue(ctx); continueErr != nil {
+							fmt.Fprintf(os.Stderr, "Error: failed to continue rebase: %v\n", continueErr)
+							fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+							os.Exit(1)
+						}
+
+						fmt.Println("✓ Auto-resolved JSONL conflict")
+					} else {
+						// Not an auto-resolvable conflict, fail with original error
+						fmt.Fprintf(os.Stderr, "Error pulling: %v\n", err)
+
+						// Check if this looks like a merge driver failure
+						errStr := err.Error()
+						if strings.Contains(errStr, "merge driver") ||
+						   strings.Contains(errStr, "no such file or directory") ||
+						   strings.Contains(errStr, "MERGE DRIVER INVOKED") {
+							fmt.Fprintf(os.Stderr, "\nThis may be caused by an incorrect merge driver configuration.\n")
+							fmt.Fprintf(os.Stderr, "Fix: bd doctor --fix\n\n")
+						}
+
+						fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+						os.Exit(1)
 					}
-
-					fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
-					os.Exit(1)
 				}
 
 				// Count issues before import for validation
@@ -439,6 +474,64 @@ func hasGitRemote(ctx context.Context) bool {
 	return len(strings.TrimSpace(string(output))) > 0
 }
 
+// isInRebase checks if we're currently in a git rebase state
+func isInRebase() bool {
+	// Check for rebase-merge directory (interactive rebase)
+	if _, err := os.Stat(".git/rebase-merge"); err == nil {
+		return true
+	}
+	// Check for rebase-apply directory (non-interactive rebase)
+	if _, err := os.Stat(".git/rebase-apply"); err == nil {
+		return true
+	}
+	return false
+}
+
+// hasJSONLConflict checks if beads.jsonl has a merge conflict
+// Returns true only if beads.jsonl is the only file in conflict
+func hasJSONLConflict() bool {
+	cmd := exec.Command("git", "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	var hasJSONLConflict bool
+	var hasOtherConflict bool
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 3 {
+			continue
+		}
+
+		// Check for unmerged status codes (UU = both modified, AA = both added, etc.)
+		status := line[:2]
+		if status == "UU" || status == "AA" || status == "DD" ||
+		   status == "AU" || status == "UA" || status == "DU" || status == "UD" {
+			filepath := strings.TrimSpace(line[3:])
+
+			if strings.HasSuffix(filepath, "beads.jsonl") {
+				hasJSONLConflict = true
+			} else {
+				hasOtherConflict = true
+			}
+		}
+	}
+
+	// Only return true if ONLY beads.jsonl has a conflict
+	return hasJSONLConflict && !hasOtherConflict
+}
+
+// runGitRebaseContinue continues a rebase after resolving conflicts
+func runGitRebaseContinue(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "git", "rebase", "--continue")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git rebase --continue failed: %w\n%s", err, output)
+	}
+	return nil
+}
+
 // gitPull pulls from the current branch's upstream
 // Returns nil if no remote configured (local-only mode)
 func checkMergeDriverConfig() {
@@ -470,7 +563,8 @@ func gitPull(ctx context.Context) error {
 	}
 	
 	// Get current branch name
-	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	// Use symbolic-ref to work in fresh repos without commits (bd-flil)
+	branchCmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "HEAD")
 	branchOutput, err := branchCmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to get current branch: %w", err)
@@ -655,14 +749,7 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 			// Non-fatal warning (see above comment about graceful degradation)
 			fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_time: %v\n", err)
 		}
-		// Store mtime for fast-path optimization in hasJSONLChanged (bd-3bg)
-		if jsonlInfo, statErr := os.Stat(jsonlPath); statErr == nil {
-			mtimeStr := fmt.Sprintf("%d", jsonlInfo.ModTime().Unix())
-			if err := store.SetMetadata(ctx, "last_import_mtime", mtimeStr); err != nil {
-				// Non-fatal warning (see above comment about graceful degradation)
-				fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_mtime: %v\n", err)
-			}
-		}
+		// Note: mtime tracking removed in bd-v0y fix (git doesn't preserve mtime)
 	}
 
 	// Update database mtime to be >= JSONL mtime (fixes #278, #301, #321)
@@ -678,8 +765,9 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 }
 
 // getCurrentBranch returns the name of the current git branch
+// Uses symbolic-ref instead of rev-parse to work in fresh repos without commits (bd-flil)
 func getCurrentBranch(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "HEAD")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get current branch: %w", err)
@@ -862,7 +950,7 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 	// Suggest next steps
 	fmt.Println("\nNext steps:")
 	fmt.Println("1. Review the merged changes")
-	fmt.Println("2. Run 'bd import' to sync the database with merged JSONL")
+	fmt.Println("2. Run 'bd sync --import-only' to sync the database with merged JSONL")
 	fmt.Println("3. Run 'bd sync' to push changes to remote")
 
 	return nil

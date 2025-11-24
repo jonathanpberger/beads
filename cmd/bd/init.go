@@ -36,6 +36,7 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		contributor, _ := cmd.Flags().GetBool("contributor")
 		team, _ := cmd.Flags().GetBool("team")
 		skipMergeDriver, _ := cmd.Flags().GetBool("skip-merge-driver")
+		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
 
 		// Initialize config (PersistentPreRun doesn't run for init command)
 		if err := config.Initialize(); err != nil {
@@ -202,6 +203,11 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 			os.Exit(1)
 		}
 
+		// === CONFIGURATION METADATA (Pattern A: Fatal) ===
+		// Configuration metadata is essential for core functionality and must succeed.
+		// These settings define fundamental behavior (issue IDs, sync workflow).
+		// Failure here indicates a serious problem that prevents normal operation.
+
 		// Set the issue prefix in config
 		if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
@@ -209,7 +215,16 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 			os.Exit(1)
 		}
 
-		// Set sync.branch if specified
+		// Set sync.branch: use explicit --branch flag, or auto-detect current branch
+		// This ensures bd sync --status works after bd init (bd-flil)
+		if branch == "" && isGitRepo() {
+			// Auto-detect current branch if not specified
+			currentBranch, err := getGitBranch()
+			if err == nil && currentBranch != "" {
+				branch = currentBranch
+			}
+		}
+
 		if branch != "" {
 			if err := syncbranch.Set(ctx, store, branch); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to set sync branch: %v\n", err)
@@ -220,6 +235,11 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 				fmt.Printf("  Sync branch: %s\n", branch)
 			}
 		}
+
+		// === TRACKING METADATA (Pattern B: Warn and Continue) ===
+		// Tracking metadata enhances functionality (diagnostics, version checks, collision detection)
+		// but the system works without it. Failures here degrade gracefully - we warn but continue.
+		// Examples: bd_version enables upgrade warnings, repo_id/clone_id help with collision detection.
 
 		// Store the bd version in metadata (for version mismatch detection)
 		if err := store.SetMetadata(ctx, "bd_version", Version); err != nil {
@@ -317,24 +337,22 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		}
 
 		// Check if we're in a git repo and hooks aren't installed
-		// Do this BEFORE quiet mode return so hooks get installed for agents
-		if isGitRepo() && !hooksInstalled() {
-			if quiet {
-				// Auto-install hooks silently in quiet mode (best default for agents)
-				_ = installGitHooks() // Ignore errors in quiet mode
-			} else {
-				// Defer to interactive prompt below
+		// Install by default unless --skip-hooks is passed
+		if !skipHooks && isGitRepo() && !hooksInstalled() {
+			if err := installGitHooks(); err != nil && !quiet {
+				yellow := color.New(color.FgYellow).SprintFunc()
+				fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks: %v\n", yellow("⚠"), err)
+				fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", color.New(color.FgCyan).Sprint("bd doctor --fix"))
 			}
 		}
 
 		// Check if we're in a git repo and merge driver isn't configured
-		// Do this BEFORE quiet mode return so merge driver gets configured for agents
+		// Install by default unless --skip-merge-driver is passed
 		if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
-			if quiet {
-				// Auto-install merge driver silently in quiet mode (best default for agents)
-				_ = installMergeDriver() // Ignore errors in quiet mode
-			} else {
-				// Defer to interactive prompt below
+			if err := installMergeDriver(); err != nil && !quiet {
+				yellow := color.New(color.FgYellow).SprintFunc()
+				fmt.Fprintf(os.Stderr, "\n%s Failed to install merge driver: %v\n", yellow("⚠"), err)
+				fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", color.New(color.FgCyan).Sprint("bd doctor --fix"))
 			}
 		}
 
@@ -345,57 +363,34 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 
 		green := color.New(color.FgGreen).SprintFunc()
 		cyan := color.New(color.FgCyan).SprintFunc()
-		yellow := color.New(color.FgYellow).SprintFunc()
 
 		fmt.Printf("\n%s bd initialized successfully!\n\n", green("✓"))
 		fmt.Printf("  Database: %s\n", cyan(initDBPath))
 		fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
 		fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
-
-		// Interactive git hooks prompt for humans
-		if isGitRepo() && !hooksInstalled() {
-			fmt.Printf("%s Git hooks not installed\n", yellow("⚠"))
-			fmt.Printf("  Install git hooks to prevent race conditions between commits and auto-flush.\n")
-			fmt.Printf("  Run: %s\n\n", cyan("./examples/git-hooks/install.sh"))
-
-			// Prompt to install
-			fmt.Printf("Install git hooks now? [Y/n] ")
-			var response string
-			_, _ = fmt.Scanln(&response) // ignore EOF on empty input
-			response = strings.ToLower(strings.TrimSpace(response))
-
-			if response == "" || response == "y" || response == "yes" {
-				if err := installGitHooks(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error installing hooks: %v\n", err)
-					fmt.Printf("You can install manually with: %s\n\n", cyan("./examples/git-hooks/install.sh"))
-				} else {
-					fmt.Printf("%s Git hooks installed successfully!\n\n", green("✓"))
-				}
-			}
-		}
-
-		// Interactive git merge driver prompt for humans
-		if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
-			fmt.Printf("%s Git merge driver not configured\n", yellow("⚠"))
-			fmt.Printf("  bd merge provides intelligent JSONL merging to prevent conflicts.\n")
-			fmt.Printf("  This will configure git to use 'bd merge' for .beads/beads.jsonl\n\n")
-
-			// Prompt to install
-			fmt.Printf("Configure git merge driver now? [Y/n] ")
-			var response string
-			_, _ = fmt.Scanln(&response) // ignore EOF on empty input
-			response = strings.ToLower(strings.TrimSpace(response))
-
-			if response == "" || response == "y" || response == "yes" {
-				if err := installMergeDriver(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error configuring merge driver: %v\n", err)
-				} else {
-					fmt.Printf("%s Git merge driver configured successfully!\n\n", green("✓"))
-				}
-			}
-		}
-
 		fmt.Printf("Run %s to get started.\n\n", cyan("bd quickstart"))
+
+		// Run bd doctor diagnostics to catch setup issues early (bd-zwtq)
+		doctorResult := runDiagnostics(cwd)
+		// Check if there are any warnings or errors (not just critical failures)
+		hasIssues := false
+		for _, check := range doctorResult.Checks {
+			if check.Status != statusOK {
+				hasIssues = true
+				break
+			}
+		}
+		if hasIssues {
+			yellow := color.New(color.FgYellow).SprintFunc()
+			fmt.Printf("%s Setup incomplete. Some issues were detected:\n", yellow("⚠"))
+			// Show just the warnings/errors, not all checks
+			for _, check := range doctorResult.Checks {
+				if check.Status != statusOK {
+					fmt.Printf("  • %s: %s\n", check.Name, check.Message)
+				}
+			}
+			fmt.Printf("\nRun %s to see details and fix these issues.\n\n", cyan("bd doctor --fix"))
+		}
 	},
 }
 
@@ -405,7 +400,8 @@ func init() {
 	initCmd.Flags().StringP("branch", "b", "", "Git branch for beads commits (default: current branch)")
 	initCmd.Flags().Bool("contributor", false, "Run OSS contributor setup wizard")
 	initCmd.Flags().Bool("team", false, "Run team workflow setup wizard")
-	initCmd.Flags().Bool("skip-merge-driver", false, "Skip git merge driver setup (non-interactive)")
+	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
+	initCmd.Flags().Bool("skip-merge-driver", false, "Skip git merge driver setup")
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -433,6 +429,23 @@ func hooksInstalled() bool {
 	postMergeContent, err := os.ReadFile(postMerge)
 	if err != nil || !strings.Contains(string(postMergeContent), "bd (beads) post-merge hook") {
 		return false
+	}
+
+	// Verify hooks are executable
+	preCommitInfo, err := os.Stat(preCommit)
+	if err != nil {
+		return false
+	}
+	if preCommitInfo.Mode().Perm()&0111 == 0 {
+		return false // Not executable
+	}
+
+	postMergeInfo, err := os.Stat(postMerge)
+	if err != nil {
+		return false
+	}
+	if postMergeInfo.Mode().Perm()&0111 == 0 {
+		return false // Not executable
 	}
 
 	return true
@@ -766,12 +779,20 @@ exit 0
 	return nil
 }
 
-// mergeDriverInstalled checks if bd merge driver is configured
+// mergeDriverInstalled checks if bd merge driver is configured correctly
 func mergeDriverInstalled() bool {
 	// Check git config for merge driver
 	cmd := exec.Command("git", "config", "merge.beads.driver")
 	output, err := cmd.Output()
 	if err != nil || len(output) == 0 {
+		return false
+	}
+
+	// Check if using old invalid placeholders (%L/%R from versions <0.24.0)
+	// Git only supports %O (base), %A (current), %B (other)
+	driverConfig := strings.TrimSpace(string(output))
+	if strings.Contains(driverConfig, "%L") || strings.Contains(driverConfig, "%R") {
+		// Stale config with invalid placeholders - needs repair
 		return false
 	}
 
@@ -782,9 +803,12 @@ func mergeDriverInstalled() bool {
 		return false
 	}
 
-	// Look for beads JSONL merge attribute
-	return strings.Contains(string(content), ".beads/beads.jsonl") &&
+	// Look for beads JSONL merge attribute (either canonical or legacy filename)
+	hasCanonical := strings.Contains(string(content), ".beads/issues.jsonl") &&
 		strings.Contains(string(content), "merge=beads")
+	hasLegacy := strings.Contains(string(content), ".beads/beads.jsonl") &&
+		strings.Contains(string(content), "merge=beads")
+	return hasCanonical || hasLegacy
 }
 
 // installMergeDriver configures git to use bd merge for JSONL files

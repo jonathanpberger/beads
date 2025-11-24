@@ -83,6 +83,11 @@ var (
 
 	// Auto-import state
 	autoImportEnabled = true // Can be disabled with --no-auto-import
+
+	// Version upgrade tracking (bd-loka)
+	versionUpgradeDetected = false // Set to true if bd version changed since last run
+	previousVersion        = ""    // The last bd version user had (empty = first run or unknown)
+	upgradeAcknowledged    = false // Set to true after showing upgrade notification once per session
 )
 
 var (
@@ -94,6 +99,8 @@ var (
 	profileEnabled bool
 	profileFile    *os.File
 	traceFile      *os.File
+	verboseFlag    bool // Enable verbose/debug output
+	quietFlag      bool // Suppress non-essential output
 )
 
 func init() {
@@ -113,9 +120,11 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&allowStale, "allow-stale", false, "Allow operations on potentially stale data (skip staleness check)")
 	rootCmd.PersistentFlags().BoolVar(&noDb, "no-db", false, "Use no-db mode: load from JSONL, no SQLite")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
+	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
+	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
 
 	// Add --version flag to root command (same behavior as version subcommand)
-	rootCmd.Flags().BoolP("version", "v", false, "Print version information")
+	rootCmd.Flags().BoolP("version", "V", false, "Print version information")
 }
 
 var rootCmd = &cobra.Command{
@@ -134,6 +143,10 @@ var rootCmd = &cobra.Command{
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		// Set up signal-aware context for graceful cancellation
 		rootCtx, rootCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+		// Apply verbosity flags early (before any output)
+		debug.SetVerbose(verboseFlag)
+		debug.SetQuiet(quietFlag)
 
 		// Apply viper configuration if flags weren't explicitly set
 		// Priority: flags > viper (config file + env vars) > defaults
@@ -196,7 +209,15 @@ var rootCmd = &cobra.Command{
 			"version",
 			"zsh",
 		}
-		if slices.Contains(noDbCommands, cmd.Name()) {
+		// Check both the command name and parent command name for subcommands
+		cmdName := cmd.Name()
+		if cmd.Parent() != nil {
+			parentName := cmd.Parent().Name()
+			if slices.Contains(noDbCommands, parentName) {
+				return
+			}
+		}
+		if slices.Contains(noDbCommands, cmdName) {
 			return
 		}
 
@@ -256,8 +277,10 @@ var rootCmd = &cobra.Command{
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
 				dbPath = foundDB
 			} else {
-				// Allow import command to auto-initialize database if missing
-				if cmd.Name() != "import" {
+				// Allow some commands to run without a database
+				// - import: auto-initializes database if missing
+				// - setup: creates editor integration files (no DB needed)
+				if cmd.Name() != "import" && cmd.Name() != "setup" {
 					// No database found - error out instead of falling back to ~/.beads
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to create a database in the current directory\n")
@@ -265,7 +288,7 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "      or set BEADS_DB to point to your database file (deprecated)\n")
 					os.Exit(1)
 				}
-				// For import command, set default database path
+				// For import/setup commands, set default database path
 				dbPath = filepath.Join(".beads", beads.CanonicalDatabaseName)
 			}
 		}
@@ -282,6 +305,10 @@ var rootCmd = &cobra.Command{
 				actor = "unknown"
 			}
 		}
+
+		// Track bd version changes (bd-loka)
+		// Best-effort tracking - failures are silent
+		trackBdVersion()
 
 		// Initialize daemon status
 		socketPath := getSocketPath()
@@ -455,6 +482,11 @@ var rootCmd = &cobra.Command{
 
 			debug.Logf("using direct mode (reason: %s)", daemonStatus.FallbackReason)
 		}
+
+		// Auto-migrate database on version bump (bd-jgxi)
+		// Do this AFTER daemon check but BEFORE opening database for main operation
+		// This ensures: 1) no daemon has DB open, 2) we don't open DB twice
+		autoMigrateOnVersionBump(dbPath)
 
 		// Fall back to direct storage access
 		var err error

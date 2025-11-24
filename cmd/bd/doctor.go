@@ -70,6 +70,7 @@ This command checks:
   - Circular dependencies
   - Git hooks (pre-commit, post-merge, pre-push)
   - .beads/.gitignore up to date
+  - Metadata.json version tracking (LastBdVersion field)
 
 Performance Mode (--perf):
   Run performance diagnostics on your database:
@@ -195,6 +196,10 @@ func applyFixes(result doctorResult) {
 			err = fix.SchemaCompatibility(result.Path)
 		case "Git Merge Driver":
 			err = fix.MergeDriver(result.Path)
+		case "Sync Branch Config":
+			err = fix.SyncBranchConfig(result.Path)
+		case "Database Config":
+			err = fix.DatabaseConfig(result.Path)
 		default:
 			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
 			fmt.Printf("  Manual fix: %s\n", check.Fix)
@@ -341,6 +346,16 @@ func runDiagnostics(path string) doctorResult {
 	mergeDriverCheck := checkMergeDriver(path)
 	result.Checks = append(result.Checks, mergeDriverCheck)
 	// Don't fail overall check for merge driver, just warn
+
+	// Check 16: Metadata.json version tracking (bd-u4sb)
+	metadataCheck := checkMetadataVersionTracking(path)
+	result.Checks = append(result.Checks, metadataCheck)
+	// Don't fail overall check for metadata, just warn
+
+	// Check 17: Sync branch configuration (bd-rsua)
+	syncBranchCheck := checkSyncBranchConfig(path)
+	result.Checks = append(result.Checks, syncBranchCheck)
+	// Don't fail overall check for missing sync.branch, just warn
 
 	return result
 }
@@ -1583,6 +1598,235 @@ func checkMergeDriver(path string) doctorCheck {
 		Status:  statusOK,
 		Message: "Correctly configured",
 		Detail:  currentConfig,
+	}
+}
+
+func checkMetadataVersionTracking(path string) doctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+
+	// Load metadata.json
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return doctorCheck{
+			Name:    "Metadata Version Tracking",
+			Status:  statusError,
+			Message: "Unable to read metadata.json",
+			Detail:  err.Error(),
+			Fix:     "Ensure metadata.json exists and is valid JSON. Run 'bd init' if needed.",
+		}
+	}
+
+	// Check if metadata.json exists
+	if cfg == nil {
+		return doctorCheck{
+			Name:    "Metadata Version Tracking",
+			Status:  statusWarning,
+			Message: "metadata.json not found",
+			Fix:     "Run any bd command to create metadata.json with version tracking",
+		}
+	}
+
+	// Check if LastBdVersion field is present
+	if cfg.LastBdVersion == "" {
+		return doctorCheck{
+			Name:    "Metadata Version Tracking",
+			Status:  statusWarning,
+			Message: "LastBdVersion field is empty (first run)",
+			Detail:  "Version tracking will be initialized on next command",
+			Fix:     "Run any bd command to initialize version tracking",
+		}
+	}
+
+	// Validate that LastBdVersion is a valid semver-like string
+	// Simple validation: should be X.Y.Z format where X, Y, Z are numbers
+	if !isValidSemver(cfg.LastBdVersion) {
+		return doctorCheck{
+			Name:    "Metadata Version Tracking",
+			Status:  statusWarning,
+			Message: fmt.Sprintf("LastBdVersion has invalid format: %q", cfg.LastBdVersion),
+			Detail:  "Expected semver format like '0.24.2'",
+			Fix:     "Run any bd command to reset version tracking to current version",
+		}
+	}
+
+	// Check if LastBdVersion is very old (> 10 versions behind)
+	// Calculate version distance
+	versionDiff := compareVersions(Version, cfg.LastBdVersion)
+	if versionDiff > 0 {
+		// Current version is newer - check how far behind
+		currentParts := parseVersionParts(Version)
+		lastParts := parseVersionParts(cfg.LastBdVersion)
+
+		// Simple heuristic: warn if minor version is 10+ behind or major version differs by 1+
+		majorDiff := currentParts[0] - lastParts[0]
+		minorDiff := currentParts[1] - lastParts[1]
+
+		if majorDiff >= 1 || (majorDiff == 0 && minorDiff >= 10) {
+			return doctorCheck{
+				Name:    "Metadata Version Tracking",
+				Status:  statusWarning,
+				Message: fmt.Sprintf("LastBdVersion is very old: %s (current: %s)", cfg.LastBdVersion, Version),
+				Detail:  "You may have missed important upgrade notifications",
+				Fix:     "Run 'bd upgrade review' to see recent changes",
+			}
+		}
+
+		// Version is behind but not too old
+		return doctorCheck{
+			Name:    "Metadata Version Tracking",
+			Status:  statusOK,
+			Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", cfg.LastBdVersion, Version),
+		}
+	}
+
+	// Version is current or ahead (shouldn't happen, but handle it)
+	return doctorCheck{
+		Name:    "Metadata Version Tracking",
+		Status:  statusOK,
+		Message: fmt.Sprintf("Version tracking active (version: %s)", cfg.LastBdVersion),
+	}
+}
+
+// isValidSemver checks if a version string is valid semver-like format (X.Y.Z)
+func isValidSemver(version string) bool {
+	if version == "" {
+		return false
+	}
+
+	// Split by dots and ensure all parts are numeric
+	versionParts := strings.Split(version, ".")
+	if len(versionParts) < 1 {
+		return false
+	}
+
+	// Parse each part to ensure it's a valid number
+	for _, part := range versionParts {
+		if part == "" {
+			return false
+		}
+		var num int
+		if _, err := fmt.Sscanf(part, "%d", &num); err != nil {
+			return false
+		}
+		if num < 0 {
+			return false
+		}
+	}
+
+	return true
+}
+
+// parseVersionParts parses version string into numeric parts
+// Returns [major, minor, patch, ...] or empty slice on error
+func parseVersionParts(version string) []int {
+	parts := strings.Split(version, ".")
+	result := make([]int, 0, len(parts))
+
+	for _, part := range parts {
+		var num int
+		if _, err := fmt.Sscanf(part, "%d", &num); err != nil {
+			return result
+		}
+		result = append(result, num)
+	}
+
+	return result
+}
+
+func checkSyncBranchConfig(path string) doctorCheck {
+	beadsDir := filepath.Join(path, ".beads")
+
+	// Skip if .beads doesn't exist
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusOK,
+			Message: "N/A (no .beads directory)",
+		}
+	}
+
+	// Check if we're in a git repository
+	gitDir := filepath.Join(path, ".git")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	// Check metadata.json first for custom database name
+	var dbPath string
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	} else {
+		// Fall back to canonical database name
+		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	}
+
+	// Skip if no database (JSONL-only mode)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusOK,
+			Message: "N/A (JSONL-only mode)",
+		}
+	}
+
+	// Open database to check config
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusWarning,
+			Message: "Unable to check sync.branch config",
+			Detail:  err.Error(),
+		}
+	}
+	defer db.Close()
+
+	// Check if sync.branch is configured
+	var syncBranch string
+	err = db.QueryRow("SELECT value FROM config WHERE key = ?", "sync.branch").Scan(&syncBranch)
+	if err != nil && err != sql.ErrNoRows {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusWarning,
+			Message: "Unable to read sync.branch config",
+			Detail:  err.Error(),
+		}
+	}
+
+	// If sync.branch is already configured, we're good
+	if syncBranch != "" {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusOK,
+			Message: fmt.Sprintf("Configured (%s)", syncBranch),
+		}
+	}
+
+	// sync.branch is not configured - get current branch for the fix message
+	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
+	cmd.Dir = path
+	output, err := cmd.Output()
+	if err != nil {
+		return doctorCheck{
+			Name:    "Sync Branch Config",
+			Status:  statusWarning,
+			Message: "sync.branch not configured",
+			Detail:  "Unable to detect current branch",
+			Fix:     "Run 'bd config set sync.branch <branch-name>' or 'bd doctor --fix' to auto-configure",
+		}
+	}
+
+	currentBranch := strings.TrimSpace(string(output))
+	return doctorCheck{
+		Name:    "Sync Branch Config",
+		Status:  statusWarning,
+		Message: "sync.branch not configured",
+		Detail:  fmt.Sprintf("Current branch: %s", currentBranch),
+		Fix:     fmt.Sprintf("Run 'bd doctor --fix' to auto-configure to '%s', or manually: bd config set sync.branch <branch-name>", currentBranch),
 	}
 }
 

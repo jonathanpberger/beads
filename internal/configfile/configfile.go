@@ -10,14 +10,15 @@ import (
 const ConfigFileName = "metadata.json"
 
 type Config struct {
-	Database     string `json:"database"`
-	JSONLExport  string `json:"jsonl_export,omitempty"`
+	Database      string `json:"database"`
+	JSONLExport   string `json:"jsonl_export,omitempty"`
+	LastBdVersion string `json:"last_bd_version,omitempty"`
 }
 
 func DefaultConfig() *Config {
 	return &Config{
 		Database:    "beads.db",
-		JSONLExport: "issues.jsonl",
+		JSONLExport: "beads.jsonl", // Default to canonical name (was issues.jsonl)
 	}
 }
 

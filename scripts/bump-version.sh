@@ -9,24 +9,26 @@ NC='\033[0m' # No Color
 
 # Usage message
 usage() {
-    echo "Usage: $0 <version> [--commit] [--tag] [--push] [--install]"
+    echo "Usage: $0 <version> [--commit] [--tag] [--push] [--install] [--upgrade-mcp]"
     echo ""
     echo "Bump version across all beads components."
     echo ""
     echo "Arguments:"
-    echo "  <version>    Semantic version (e.g., 0.9.3, 1.0.0)"
-    echo "  --commit     Automatically create a git commit (optional)"
-    echo "  --tag        Create annotated git tag after commit (requires --commit)"
-    echo "  --push       Push commit and tag to origin (requires --commit and --tag)"
-    echo "  --install    Rebuild and install bd binary to GOPATH/bin after version bump"
+    echo "  <version>      Semantic version (e.g., 0.9.3, 1.0.0)"
+    echo "  --commit       Automatically create a git commit (optional)"
+    echo "  --tag          Create annotated git tag after commit (requires --commit)"
+    echo "  --push         Push commit and tag to origin (requires --commit and --tag)"
+    echo "  --install      Rebuild and install bd binary to GOPATH/bin after version bump"
+    echo "  --upgrade-mcp  Upgrade local beads-mcp installation via pip after version bump"
     echo ""
     echo "Examples:"
-    echo "  $0 0.9.3                      # Update versions and show diff"
-    echo "  $0 0.9.3 --install            # Update versions and rebuild/install bd"
-    echo "  $0 0.9.3 --commit             # Update versions and commit"
-    echo "  $0 0.9.3 --commit --tag       # Update, commit, and tag"
-    echo "  $0 0.9.3 --commit --tag --push  # Full release preparation"
-    echo "  $0 0.9.3 --commit --install   # Update, commit, and install"
+    echo "  $0 0.9.3                            # Update versions and show diff"
+    echo "  $0 0.9.3 --install                  # Update versions and rebuild/install bd"
+    echo "  $0 0.9.3 --upgrade-mcp              # Update versions and upgrade beads-mcp"
+    echo "  $0 0.9.3 --commit                   # Update versions and commit"
+    echo "  $0 0.9.3 --commit --tag             # Update, commit, and tag"
+    echo "  $0 0.9.3 --commit --tag --push      # Full release preparation"
+    echo "  $0 0.9.3 --commit --install --upgrade-mcp  # Update, commit, and install all"
     exit 1
 }
 
@@ -60,6 +62,33 @@ update_file() {
     fi
 }
 
+# Update CHANGELOG.md: move [Unreleased] to [version] and create new [Unreleased]
+update_changelog() {
+    local version=$1
+    local date=$(date +%Y-%m-%d)
+
+    if [ ! -f "CHANGELOG.md" ]; then
+        echo -e "${YELLOW}Warning: CHANGELOG.md not found, skipping${NC}"
+        return
+    fi
+
+    # Check if there's an [Unreleased] section
+    if ! grep -q "## \[Unreleased\]" CHANGELOG.md; then
+        echo -e "${YELLOW}Warning: No [Unreleased] section in CHANGELOG.md${NC}"
+        echo -e "${YELLOW}You may need to manually update CHANGELOG.md${NC}"
+        return
+    fi
+
+    # Create a temporary file with the updated changelog
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS
+        sed -i '' "s/## \[Unreleased\]/## [Unreleased]\n\n## [$version] - $date/" CHANGELOG.md
+    else
+        # Linux
+        sed -i "s/## \[Unreleased\]/## [Unreleased]\n\n## [$version] - $date/" CHANGELOG.md
+    fi
+}
+
 # Main script
 main() {
     # Check arguments
@@ -72,6 +101,7 @@ main() {
     AUTO_TAG=false
     AUTO_PUSH=false
     AUTO_INSTALL=false
+    AUTO_UPGRADE_MCP=false
 
     # Parse flags
     shift  # Remove version argument
@@ -88,6 +118,9 @@ main() {
                 ;;
             --install)
                 AUTO_INSTALL=true
+                ;;
+            --upgrade-mcp)
+                AUTO_UPGRADE_MCP=true
                 ;;
             *)
                 echo -e "${RED}Error: Unknown option '$1'${NC}"
@@ -197,6 +230,10 @@ main() {
             "# bd-hooks-version: $NEW_VERSION"
     done
 
+    # 10. Update CHANGELOG.md
+    echo "  • CHANGELOG.md"
+    update_changelog "$NEW_VERSION"
+
     echo ""
     echo -e "${GREEN}✓ Version updated to $NEW_VERSION${NC}"
     echo ""
@@ -272,6 +309,48 @@ main() {
         echo ""
     fi
 
+    # Auto-upgrade MCP if requested
+    if [ "$AUTO_UPGRADE_MCP" = true ]; then
+        echo "Upgrading local beads-mcp installation..."
+
+        # Try pip first (most common)
+        if command -v pip &> /dev/null; then
+            if pip install --upgrade beads-mcp; then
+                echo -e "${GREEN}✓ beads-mcp upgraded via pip${NC}"
+                echo ""
+                INSTALLED_MCP_VERSION=$(pip show beads-mcp 2>/dev/null | grep Version | awk '{print $2}')
+                if [ "$INSTALLED_MCP_VERSION" = "$NEW_VERSION" ]; then
+                    echo -e "${GREEN}✓ Verified: beads-mcp version is $INSTALLED_MCP_VERSION${NC}"
+                    echo -e "${YELLOW}  Note: Restart Claude Code or MCP session to use the new version${NC}"
+                else
+                    echo -e "${YELLOW}⚠ Warning: beads-mcp version is $INSTALLED_MCP_VERSION (expected $NEW_VERSION)${NC}"
+                    echo -e "${YELLOW}  This is normal - PyPI package may not be published yet${NC}"
+                    echo -e "${YELLOW}  The local source version in pyproject.toml is $NEW_VERSION${NC}"
+                fi
+            else
+                echo -e "${YELLOW}⚠ pip upgrade failed or beads-mcp not installed via pip${NC}"
+                echo -e "${YELLOW}  You may need to upgrade manually after publishing to PyPI${NC}"
+            fi
+        # Try uv tool as fallback
+        elif command -v uv &> /dev/null; then
+            if uv tool list | grep -q beads-mcp; then
+                if uv tool upgrade beads-mcp; then
+                    echo -e "${GREEN}✓ beads-mcp upgraded via uv tool${NC}"
+                    echo -e "${YELLOW}  Note: Restart Claude Code or MCP session to use the new version${NC}"
+                else
+                    echo -e "${RED}✗ uv tool upgrade failed${NC}"
+                fi
+            else
+                echo -e "${YELLOW}⚠ beads-mcp not installed via uv tool${NC}"
+                echo -e "${YELLOW}  Install with: uv tool install beads-mcp${NC}"
+            fi
+        else
+            echo -e "${YELLOW}⚠ Neither pip nor uv found${NC}"
+            echo -e "${YELLOW}  Install beads-mcp with: pip install beads-mcp${NC}"
+        fi
+        echo ""
+    fi
+
     # Auto-commit if requested
     if [ "$AUTO_COMMIT" = true ]; then
         echo "Creating git commit..."
@@ -284,10 +363,15 @@ main() {
                 npm-package/package.json \
                 README.md \
                 cmd/bd/templates/hooks/*
-        
+
         # Add PLUGIN.md if it exists
         if [ -f "PLUGIN.md" ]; then
             git add PLUGIN.md
+        fi
+
+        # Add CHANGELOG.md if it exists
+        if [ -f "CHANGELOG.md" ]; then
+            git add CHANGELOG.md
         fi
 
         git commit -m "chore: Bump version to $NEW_VERSION
@@ -327,12 +411,18 @@ Generated by scripts/bump-version.sh"
             if [ "$AUTO_INSTALL" = false ]; then
                 echo -e "  ${YELLOW}make install${NC}  # ⚠️  IMPORTANT: Rebuild and install bd binary!"
             fi
+            if [ "$AUTO_UPGRADE_MCP" = false ]; then
+                echo -e "  ${YELLOW}pip install --upgrade beads-mcp${NC}  # ⚠️  After publishing to PyPI"
+            fi
             echo "  git push origin main"
             echo "  git push origin v$NEW_VERSION"
         else
             echo "Next steps:"
             if [ "$AUTO_INSTALL" = false ]; then
                 echo -e "  ${YELLOW}make install${NC}  # ⚠️  IMPORTANT: Rebuild and install bd binary!"
+            fi
+            if [ "$AUTO_UPGRADE_MCP" = false ]; then
+                echo -e "  ${YELLOW}pip install --upgrade beads-mcp${NC}  # ⚠️  After publishing to PyPI"
             fi
             echo "  git push origin main"
             echo "  git tag -a v$NEW_VERSION -m 'Release v$NEW_VERSION'"
@@ -344,6 +434,10 @@ Generated by scripts/bump-version.sh"
             echo -e "  ${YELLOW}make install${NC}  # ⚠️  IMPORTANT: Rebuild and install bd binary first!"
             echo ""
         fi
+        if [ "$AUTO_UPGRADE_MCP" = false ]; then
+            echo -e "  ${YELLOW}pip install --upgrade beads-mcp${NC}  # ⚠️  After publishing to PyPI"
+            echo ""
+        fi
         echo "  git add -A"
         echo "  git commit -m 'chore: Bump version to $NEW_VERSION'"
         echo "  git tag -a v$NEW_VERSION -m 'Release v$NEW_VERSION'"
@@ -351,7 +445,7 @@ Generated by scripts/bump-version.sh"
         echo "  git push origin v$NEW_VERSION"
         echo ""
         echo "Or run with flags to automate:"
-        echo "  $0 $NEW_VERSION --commit --tag --push --install"
+        echo "  $0 $NEW_VERSION --commit --tag --push --install --upgrade-mcp"
     fi
 }
 

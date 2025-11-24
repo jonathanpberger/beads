@@ -526,7 +526,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to read .gitattributes: %v", err)
 		}
-		if !strings.Contains(string(content), ".beads/beads.jsonl merge=beads") {
+		if !strings.Contains(string(content), ".beads/issues.jsonl merge=beads") {
 			t.Error(".gitattributes should contain merge driver configuration")
 		}
 	})
@@ -627,13 +627,13 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 
 		// Pre-configure merge driver manually
-		if err := runCommandInDir(tmpDir, "git", "config", "merge.beads.driver", "bd merge %A %O %L %R"); err != nil {
+		if err := runCommandInDir(tmpDir, "git", "config", "merge.beads.driver", "bd merge %A %O %A %B"); err != nil {
 			t.Fatalf("Failed to set git config: %v", err)
 		}
 
 		// Create .gitattributes with merge driver
 		gitattrsPath := filepath.Join(tmpDir, ".gitattributes")
-		initialContent := "# Existing config\n.beads/beads.jsonl merge=beads\n"
+		initialContent := "# Existing config\n.beads/issues.jsonl merge=beads\n"
 		if err := os.WriteFile(gitattrsPath, []byte(initialContent), 0644); err != nil {
 			t.Fatalf("Failed to create .gitattributes: %v", err)
 		}
@@ -661,7 +661,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 
 		contentStr := string(content)
 		// Count occurrences - should only appear once
-		count := strings.Count(contentStr, ".beads/beads.jsonl merge=beads")
+		count := strings.Count(contentStr, ".beads/issues.jsonl merge=beads")
 		if count != 1 {
 			t.Errorf("Expected .gitattributes to contain merge config exactly once, found %d times", count)
 		}
@@ -727,13 +727,13 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		}
 
 		// Should contain beads config
-		if !strings.Contains(contentStr, ".beads/beads.jsonl merge=beads") {
+		if !strings.Contains(contentStr, ".beads/issues.jsonl merge=beads") {
 			t.Error(".gitattributes should contain beads merge config")
 		}
 
 		// Beads config should come after existing content
 		txtIdx := strings.Index(contentStr, "*.txt")
-		beadsIdx := strings.Index(contentStr, ".beads/beads.jsonl")
+		beadsIdx := strings.Index(contentStr, ".beads/issues.jsonl")
 		if txtIdx >= beadsIdx {
 			t.Error("Beads config should be appended after existing content")
 		}
@@ -776,7 +776,7 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 			t.Fatalf("Failed to get merge.beads.driver: %v", err)
 		}
 		driver = strings.TrimSpace(driver)
-		expected := "bd merge %A %O %L %R"
+		expected := "bd merge %A %O %A %B"
 		if driver != expected {
 			t.Errorf("Expected merge.beads.driver to be %q, got %q", expected, driver)
 		}
@@ -789,6 +789,123 @@ func TestInitMergeDriverAutoConfiguration(t *testing.T) {
 		name = strings.TrimSpace(name)
 		if !strings.Contains(name, "bd") {
 			t.Errorf("Expected merge.beads.name to contain 'bd', got %q", name)
+		}
+	})
+
+	t.Run("auto-repair stale merge driver with invalid placeholders", func(t *testing.T) {
+		// Reset global state
+		origDBPath := dbPath
+		defer func() { dbPath = origDBPath }()
+		dbPath = ""
+
+		tmpDir := t.TempDir()
+		originalWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Failed to get working directory: %v", err)
+		}
+		defer os.Chdir(originalWd)
+
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatalf("Failed to change to temp directory: %v", err)
+		}
+
+		// Initialize git repo
+		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
+			t.Fatalf("Failed to init git: %v", err)
+		}
+
+		// Configure stale merge driver with old invalid placeholders (%L/%R)
+		// This simulates a user who initialized with bd version <0.24.0
+		if err := runCommandInDir(tmpDir, "git", "config", "merge.beads.driver", "bd merge %L %R"); err != nil {
+			t.Fatalf("Failed to set stale git config: %v", err)
+		}
+
+		// Create .gitattributes with merge driver
+		gitattrsPath := filepath.Join(tmpDir, ".gitattributes")
+		if err := os.WriteFile(gitattrsPath, []byte(".beads/beads.jsonl merge=beads\n"), 0644); err != nil {
+			t.Fatalf("Failed to create .gitattributes: %v", err)
+		}
+
+		// Run bd init - should detect stale config and repair it
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("Init failed: %v", err)
+		}
+
+		// Verify merge driver was updated to correct placeholders
+		driver, err := runCommandInDirWithOutput(tmpDir, "git", "config", "merge.beads.driver")
+		if err != nil {
+			t.Fatalf("Failed to get merge.beads.driver: %v", err)
+		}
+		driver = strings.TrimSpace(driver)
+		expected := "bd merge %A %O %A %B"
+		if driver != expected {
+			t.Errorf("Expected merge driver to be repaired to %q, got %q", expected, driver)
+		}
+
+		// Verify it no longer contains invalid placeholders
+		if strings.Contains(driver, "%L") || strings.Contains(driver, "%R") {
+			t.Errorf("Merge driver should not contain invalid %%L or %%R placeholders, got %q", driver)
+		}
+	})
+
+	t.Run("detect canonical issues.jsonl filename in gitattributes", func(t *testing.T) {
+		// Reset global state
+		origDBPath := dbPath
+		defer func() { dbPath = origDBPath }()
+		dbPath = ""
+
+		tmpDir := t.TempDir()
+		originalWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Failed to get working directory: %v", err)
+		}
+		defer os.Chdir(originalWd)
+
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatalf("Failed to change to temp directory: %v", err)
+		}
+
+		// Initialize git repo
+		if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
+			t.Fatalf("Failed to init git: %v", err)
+		}
+
+		// Pre-configure correct merge driver and canonical filename in .gitattributes
+		if err := runCommandInDir(tmpDir, "git", "config", "merge.beads.driver", "bd merge %A %O %A %B"); err != nil {
+			t.Fatalf("Failed to set git config: %v", err)
+		}
+
+		// Create .gitattributes with canonical filename (issues.jsonl, not beads.jsonl)
+		gitattrsPath := filepath.Join(tmpDir, ".gitattributes")
+		if err := os.WriteFile(gitattrsPath, []byte(".beads/issues.jsonl merge=beads\n"), 0644); err != nil {
+			t.Fatalf("Failed to create .gitattributes: %v", err)
+		}
+
+		// Run bd init - should detect existing correct config and NOT reinstall
+		rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("Init failed: %v", err)
+		}
+
+		// Verify merge driver is still correct (not reinstalled unnecessarily)
+		driver, err := runCommandInDirWithOutput(tmpDir, "git", "config", "merge.beads.driver")
+		if err != nil {
+			t.Fatalf("Failed to get merge.beads.driver: %v", err)
+		}
+		driver = strings.TrimSpace(driver)
+		expected := "bd merge %A %O %A %B"
+		if driver != expected {
+			t.Errorf("Expected merge driver to remain %q, got %q", expected, driver)
+		}
+
+		// Verify .gitattributes still has canonical filename (not overwritten)
+		content, err := os.ReadFile(gitattrsPath)
+		if err != nil {
+			t.Fatalf("Failed to read .gitattributes: %v", err)
+		}
+		if !strings.Contains(string(content), ".beads/issues.jsonl merge=beads") {
+			t.Errorf(".gitattributes should still contain canonical filename pattern")
 		}
 	})
 }

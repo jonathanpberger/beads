@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"golang.org/x/term"
 )
 
 var importCmd = &cobra.Command{
@@ -51,7 +51,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			daemonClient = nil
 
 			var err error
-			store, err = sqlite.New(dbPath)
+			store, err = sqlite.New(rootCtx, dbPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 				os.Exit(1)
@@ -70,6 +70,19 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		dedupeAfter, _ := cmd.Flags().GetBool("dedupe-after")
 		clearDuplicateExternalRefs, _ := cmd.Flags().GetBool("clear-duplicate-external-refs")
 		orphanHandling, _ := cmd.Flags().GetString("orphan-handling")
+		force, _ := cmd.Flags().GetBool("force")
+
+		// Check if stdin is being used interactively (not piped)
+		if input == "" && term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprintf(os.Stderr, "Error: No input specified.\n\n")
+			fmt.Fprintf(os.Stderr, "Usage:\n")
+			fmt.Fprintf(os.Stderr, "  bd import -i .beads/beads.jsonl          # Import from file\n")
+			fmt.Fprintf(os.Stderr, "  bd import -i .beads/beads.jsonl --dry-run # Preview changes\n")
+			fmt.Fprintf(os.Stderr, "  cat data.jsonl | bd import               # Import from pipe\n")
+			fmt.Fprintf(os.Stderr, "  bd sync --import-only                    # Import latest JSONL\n\n")
+			fmt.Fprintf(os.Stderr, "For more information, run: bd import --help\n")
+			os.Exit(1)
+		}
 
 		// Open input
 		in := os.Stdin
@@ -89,7 +102,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		}
 
 		// Phase 1: Read and parse all JSONL
-		ctx := context.Background()
+		ctx := rootCtx
 		scanner := bufio.NewScanner(in)
 
 		var allIssues []*types.Issue
@@ -118,8 +131,8 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 				if err := attemptAutoMerge(input); err != nil {
 					fmt.Fprintf(os.Stderr, "Error: Automatic merge failed: %v\n\n", err)
 					fmt.Fprintf(os.Stderr, "To resolve manually:\n")
-					fmt.Fprintf(os.Stderr, "  git checkout --ours .beads/issues.jsonl && bd import -i .beads/issues.jsonl\n")
-					fmt.Fprintf(os.Stderr, "  git checkout --theirs .beads/issues.jsonl && bd import -i .beads/issues.jsonl\n\n")
+					fmt.Fprintf(os.Stderr, "  git checkout --ours .beads/beads.jsonl && bd import -i .beads/beads.jsonl\n")
+					fmt.Fprintf(os.Stderr, "  git checkout --theirs .beads/beads.jsonl && bd import -i .beads/beads.jsonl\n\n")
 					fmt.Fprintf(os.Stderr, "For advanced field-level merging, see: https://github.com/neongreen/mono/tree/main/beads-merge\n")
 					os.Exit(1)
 				}
@@ -175,7 +188,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 
 		// Check if database needs initialization (prefix not set)
 		// Detect prefix from the imported issues
-		initCtx := context.Background()
+		initCtx := rootCtx
 		configuredPrefix, err2 := store.GetConfig(initCtx, "issue_prefix")
 		if err2 != nil || strings.TrimSpace(configuredPrefix) == "" {
 			// Database exists but not initialized - detect prefix from issues
@@ -308,6 +321,35 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			flushToJSONL()
 		}
 
+		// Update last_import_hash metadata to enable content-based staleness detection (bd-khnb fix)
+		// This prevents git operations from resurrecting deleted issues by comparing content instead of mtime
+		// When --force is true, ALWAYS update metadata even if no changes were made
+		if input != "" && (result.Created > 0 || result.Updated > 0 || len(result.IDMapping) > 0 || force) {
+			if currentHash, err := computeJSONLHash(input); err == nil {
+				if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
+					// Non-fatal warning: Metadata update failures are intentionally non-fatal to prevent blocking
+					// successful imports. System degrades gracefully to mtime-based staleness detection if metadata
+					// is unavailable. This ensures import operations always succeed even if metadata storage fails.
+					debug.Logf("Warning: failed to update last_import_hash: %v", err)
+				}
+				importTime := time.Now().Format(time.RFC3339)
+				if err := store.SetMetadata(ctx, "last_import_time", importTime); err != nil {
+					// Non-fatal warning (see above comment about graceful degradation)
+					debug.Logf("Warning: failed to update last_import_time: %v", err)
+				}
+				// Store mtime for fast-path optimization in hasJSONLChanged (bd-3bg)
+				if jsonlInfo, statErr := os.Stat(input); statErr == nil {
+					mtimeStr := fmt.Sprintf("%d", jsonlInfo.ModTime().Unix())
+					if err := store.SetMetadata(ctx, "last_import_mtime", mtimeStr); err != nil {
+						// Non-fatal warning (see above comment about graceful degradation)
+						debug.Logf("Warning: failed to update last_import_mtime: %v", err)
+					}
+				}
+			} else {
+				debug.Logf("Warning: failed to read JSONL for hash update: %v", err)
+			}
+		}
+
 		// Update database mtime to reflect it's now in sync with JSONL
 		// This is CRITICAL even when import found 0 changes, because:
 		// 1. Import validates DB and JSONL are in sync (no content divergence)
@@ -330,6 +372,11 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			fmt.Fprintf(os.Stderr, ", %d issues remapped", len(result.IDMapping))
 		}
 		fmt.Fprintf(os.Stderr, "\n")
+
+		// Print force message if metadata was updated despite no changes
+		if force && result.Created == 0 && result.Updated == 0 && len(result.IDMapping) == 0 {
+			fmt.Fprintf(os.Stderr, "Metadata updated (database already in sync with JSONL)\n")
+		}
 
 		// Run duplicate detection if requested
 		if dedupeAfter {
@@ -430,8 +477,8 @@ func checkUncommittedChanges(filePath string, result *ImportResult) {
 		// Get line counts for context
 		workingTreeLines := countLines(filePath)
 		headLines := countLinesInGitHEAD(filePath, workDir)
-
-		fmt.Fprintf(os.Stderr, "\n⚠️  Warning: .beads/issues.jsonl has uncommitted changes\n")
+		
+		fmt.Fprintf(os.Stderr, "\n⚠️  Warning: %s has uncommitted changes\n", filePath)
 		fmt.Fprintf(os.Stderr, "   Working tree: %d lines\n", workingTreeLines)
 		if headLines > 0 {
 			fmt.Fprintf(os.Stderr, "   Git HEAD: %d lines\n", headLines)
@@ -670,6 +717,7 @@ func init() {
 	importCmd.Flags().Bool("rename-on-import", false, "Rename imported issues to match database prefix (updates all references)")
 	importCmd.Flags().Bool("clear-duplicate-external-refs", false, "Clear duplicate external_ref values (keeps first occurrence)")
 	importCmd.Flags().String("orphan-handling", "", "How to handle missing parent issues: strict/resurrect/skip/allow (default: use config or 'allow')")
+	importCmd.Flags().Bool("force", false, "Force metadata update even when database is already in sync with JSONL")
 	importCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output import statistics in JSON format")
 	rootCmd.AddCommand(importCmd)
 }

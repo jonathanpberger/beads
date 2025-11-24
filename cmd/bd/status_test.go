@@ -28,7 +28,7 @@ func TestStatusCommand(t *testing.T) {
 	}
 
 	// Initialize the database
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestGetAssignedStatus(t *testing.T) {
 	}
 
 	// Initialize the database
-	testStore, err := sqlite.New(dbPath)
+	testStore, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -202,7 +202,10 @@ func TestGetAssignedStatus(t *testing.T) {
 		t.Fatalf("Failed to set issue prefix: %v", err)
 	}
 
-	// Set global store for getAssignedStatus
+	// Set global store and rootCtx for getAssignedStatus
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
 	store = testStore
 
 	// Create test issues with different assignees

@@ -33,7 +33,17 @@ Example:
 		fixAll, _ := cmd.Flags().GetBool("fix-all")
 		checksFlag, _ := cmd.Flags().GetString("checks")
 		jsonOut, _ := cmd.Flags().GetBool("json")
-		ctx := context.Background()
+		ctx := rootCtx
+
+		// Check database freshness before reading (bd-2q6d, bd-c4rq)
+		// Skip check when using daemon (daemon auto-imports on staleness)
+		if daemonClient == nil {
+			if err := ensureDatabaseFresh(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		// Parse and normalize checks
 		checks, err := parseChecks(checksFlag)
 		if err != nil {

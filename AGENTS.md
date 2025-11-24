@@ -1,8 +1,14 @@
 # Instructions for AI Agents Working on Beads
 
+> **📖 For detailed development instructions**, see [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md)
+>
+> This file provides a quick overview and reference. For in-depth operational details (development, testing, releases, git workflow), consult the detailed instructions.
+
 ## Project Overview
 
 This is **beads** (command: `bd`), an issue tracker designed for AI-supervised coding workflows. We dogfood our own tool!
+
+> **🤖 Using GitHub Copilot?** See [.github/copilot-instructions.md](.github/copilot-instructions.md) for a concise, Copilot-optimized version of these instructions that GitHub Copilot will automatically load.
 
 ## 🆕 What's New?
 
@@ -20,6 +26,30 @@ This shows the last 3 versions with workflow-impacting changes, avoiding the nee
 - Integration features (MCP, Agent Mail, git hooks)
 
 **Why this matters:** bd releases weekly with major versions. This command helps you quickly understand what changed without parsing the full CHANGELOG.
+
+### 🔄 After Upgrading bd
+
+When bd is upgraded to a new version, follow this workflow:
+
+```bash
+# 1. Check what changed
+bd info --whats-new
+
+# 2. Update git hooks to match new bd version
+bd hooks install
+
+# 3. Regenerate BD_GUIDE.md if it exists (optional but recommended)
+bd onboard --output .beads/BD_GUIDE.md
+
+# 4. Check for any outdated hooks (optional)
+bd info  # Shows warnings if hooks are outdated
+```
+
+**Why update hooks?** Git hooks (pre-commit, post-merge, pre-push) are versioned with bd. Outdated hooks may miss new auto-sync features or bug fixes. Running `bd hooks install` ensures hooks match your bd version.
+
+**About BD_GUIDE.md:** This is an optional auto-generated file that separates bd-specific instructions from project-specific ones. If your project uses this file (in `.beads/BD_GUIDE.md`), regenerate it after upgrades to get the latest bd documentation. The file is version-stamped and should never be manually edited.
+
+**Related:** See GitHub Discussion #239 for background on agent upgrade workflows.
 
 ## Human Setup vs Agent Usage
 
@@ -167,8 +197,8 @@ bd ready --json                                    # Unblocked issues
 bd stale --days 30 --json                          # Forgotten issues
 
 # Create and manage issues
-bd create "Issue title" -t bug|feature|task -p 0-4 --json
-bd create "Found bug" -p 1 --deps discovered-from:<parent-id> --json
+bd create "Issue title" --description="Detailed context about the issue" -t bug|feature|task -p 0-4 --json
+bd create "Found bug" --description="What the bug is and how it was discovered" -p 1 --deps discovered-from:<parent-id> --json
 bd update <id> --status in_progress --json
 bd close <id> --reason "Done" --json
 
@@ -215,12 +245,49 @@ bd monitor --port 3000      # Custom port
 2. **Claim your task**: `bd update <id> --status in_progress`
 3. **Work on it**: Implement, test, document
 4. **Discover new work**: If you find bugs or TODOs, create issues:
-   - Old way (two commands): `bd create "Found bug in auth" -t bug -p 1 --json` then `bd dep add <new-id> <current-id> --type discovered-from`
-   - New way (one command): `bd create "Found bug in auth" -t bug -p 1 --deps discovered-from:<current-id> --json`
+   - Old way (two commands): `bd create "Found bug in auth" --description="Details about the bug" -t bug -p 1 --json` then `bd dep add <new-id> <current-id> --type discovered-from`
+   - New way (one command): `bd create "Found bug in auth" --description="Login fails with 500 when password has special chars" -t bug -p 1 --deps discovered-from:<current-id> --json`
 5. **Complete**: `bd close <id> --reason "Implemented"`
 6. **Sync at end of session**: `bd sync` (see "Agent Session Workflow" below)
 
+### IMPORTANT: Always Include Issue Descriptions
+
+**Issues without descriptions lack context for future work.** When creating issues, always include a meaningful description with:
+
+- **Why** the issue exists (problem statement or need)
+- **What** needs to be done (scope and approach)
+- **How** you discovered it (if applicable during work)
+
+**Good examples:**
+
+```bash
+# Bug discovered during work
+bd create "Fix auth bug in login handler" \
+  --description="Login fails with 500 error when password contains special characters like quotes. Found while testing GH#123 feature. Stack trace shows unescaped SQL in auth/login.go:45." \
+  -t bug -p 1 --deps discovered-from:bd-abc --json
+
+# Feature request
+bd create "Add password reset flow" \
+  --description="Users need ability to reset forgotten passwords via email. Should follow OAuth best practices and include rate limiting to prevent abuse." \
+  -t feature -p 2 --json
+
+# Technical debt
+bd create "Refactor auth package for testability" \
+  --description="Current auth code has tight DB coupling making unit tests difficult. Need to extract interfaces and add dependency injection. Blocks writing tests for bd-xyz." \
+  -t task -p 3 --json
+```
+
+**Bad examples (missing context):**
+
+```bash
+bd create "Fix auth bug" -t bug -p 1 --json  # What bug? Where? Why?
+bd create "Add feature" -t feature --json     # What feature? Why needed?
+bd create "Refactor code" -t task --json      # What code? Why refactor?
+```
+
 ### Optional: Agent Mail for Multi-Agent Coordination
+
+**⚠️ NOT CURRENTLY CONFIGURED** - The mcp-agent-mail server is not set up for this project. Do not attempt to use mcp-agent-mail tools.
 
 **For multi-agent workflows only** - if multiple AI agents work on the same repository simultaneously, consider using Agent Mail for real-time coordination:
 
@@ -331,7 +398,7 @@ bd import -i issues.jsonl --dedupe-after
 
 3. **During work discovery**: Check for duplicates when filing discovered-from issues
    ```bash
-   # Before: bd create "Fix auth bug" --deps discovered-from:bd-100
+   # Before: bd create "Fix auth bug" --description="Details..." --deps discovered-from:bd-100
    # First: bd list --json | grep -i "auth bug"
    # Then decide: create new or link to existing
    ```
@@ -374,197 +441,24 @@ bd show bd-41 --json  # Verify merged content
 - Add labels like `duplicate` to source issues before merging (for tracking)
 - File a discovered-from issue if you found duplicates during work:
   ```bash
-  bd create "Found duplicates during bd-X" -p 2 --deps discovered-from:bd-X --json
+  bd create "Found duplicates during bd-X" \
+    --description="Issues bd-A, bd-B, and bd-C are duplicates and need merging" \
+    -p 2 --deps discovered-from:bd-X --json
   ```
 
 ## Development Guidelines
 
-### Code Standards
+> **📋 For complete development instructions**, see [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md)
+
+**Quick reference:**
 
 - **Go version**: 1.21+
-- **Linting**: `golangci-lint run ./...` (baseline warnings documented in [docs/LINTING.md](docs/LINTING.md))
-- **Testing**: All new features need tests (`go test -short ./...` for local, full tests run in CI)
-- **Documentation**: Update relevant .md files
+- **Testing**: Use `BEADS_DB=/tmp/test.db` to avoid polluting production database
+- **Before committing**: Run tests (`go test -short ./...`) and linter (`golangci-lint run ./...`)
+- **End of session**: Always run `bd sync` to flush/commit/push changes
+- **Git hooks**: Run `bd hooks install` to ensure DB ↔ JSONL consistency
 
-### File Organization
-
-```
-beads/
-├── cmd/bd/              # CLI commands
-├── internal/
-│   ├── types/           # Core data types
-│   └── storage/         # Storage layer
-│       └── sqlite/      # SQLite implementation
-├── examples/            # Integration examples
-└── *.md                 # Documentation
-```
-
-### Testing Workflow
-
-**IMPORTANT:** Never pollute the production database with test issues!
-
-**For manual testing**, use the `BEADS_DB` environment variable to point to a temporary database:
-
-```bash
-# Create test issues in isolated database
-BEADS_DB=/tmp/test.db ./bd init --quiet --prefix test
-BEADS_DB=/tmp/test.db ./bd create "Test issue" -p 1
-
-# Or for quick testing
-BEADS_DB=/tmp/test.db ./bd create "Test feature" -p 1
-```
-
-**For automated tests**, use `t.TempDir()` in Go tests:
-
-```go
-func TestMyFeature(t *testing.T) {
-    tmpDir := t.TempDir()
-    testDB := filepath.Join(tmpDir, ".beads", "beads.db")
-    s := newTestStore(t, testDB)
-    // ... test code
-}
-```
-
-**Warning:** bd will warn you when creating issues with "Test" prefix in the production database. Always use `BEADS_DB` for manual testing.
-
-### Before Committing
-
-1. **Run tests**: `go test -short ./...` (full tests run in CI)
-2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
-3. **Update docs**: If you changed behavior, update README.md or other docs
-4. **Commit**: Issues auto-sync to `.beads/issues.jsonl` and import after pull
-
-### Git Workflow
-
-**Auto-sync provides batching!** bd automatically:
-
-- **Exports** to JSONL after CRUD operations (30-second debounce for batching)
-- **Imports** from JSONL when it's newer than DB (e.g., after `git pull`)
-- **Daemon commits/pushes** every 5 seconds (if `--auto-commit` / `--auto-push` enabled)
-
-The 30-second debounce provides a **transaction window** for batch operations - multiple issue changes within 30 seconds get flushed together, avoiding commit spam.
-
-### Git Integration
-
-**Auto-sync**: bd automatically exports to JSONL (30s debounce), imports after `git pull`, and optionally commits/pushes.
-
-**Protected branches**: Use `bd init --branch beads-metadata` to commit to separate branch. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
-
-**Git worktrees**: Daemon mode NOT supported. Use `bd --no-daemon` for all commands. See [docs/GIT_INTEGRATION.md](docs/GIT_INTEGRATION.md).
-
-**Merge conflicts**: Rare with hash IDs. If conflicts occur, use `git checkout --theirs/.beads/beads.jsonl` and `bd import`. See [docs/GIT_INTEGRATION.md](docs/GIT_INTEGRATION.md).
-
-### Landing the Plane
-
-**When the user says "let's land the plane"**, follow this clean session-ending protocol:
-
-1. **File beads issues for any remaining work** that needs follow-up
-2. **Ensure all quality gates pass** (only if code changes were made) - run tests, linters, builds (file P0 issues if broken)
-3. **Update beads issues** - close finished work, update status
-4. **Sync the issue tracker carefully** - Work methodically to ensure both local and remote issues merge safely. This may require pulling, handling conflicts (sometimes accepting remote changes and re-importing), syncing the database, and verifying consistency. Be creative and patient - the goal is clean reconciliation where no issues are lost.
-5. **Clean up git state** - Clear old stashes and prune dead remote branches:
-   ```bash
-   git stash clear                    # Remove old stashes
-   git remote prune origin            # Clean up deleted remote branches
-   ```
-6. **Verify clean state** - Ensure all changes are committed and pushed, no untracked files remain
-7. **Choose a follow-up issue for next session**
-   - Provide a prompt for the user to give to you in the next session
-   - Format: "Continue work on bd-X: [issue title]. [Brief context about what's been done and what's next]"
-
-**Example "land the plane" session:**
-
-```bash
-# 1. File remaining work
-bd create "Add integration tests for sync" -t task -p 2 --json
-
-# 2. Run quality gates (only if code changes were made)
-go test -short ./...
-golangci-lint run ./...
-
-# 3. Close finished issues
-bd close bd-42 bd-43 --reason "Completed" --json
-
-# 4. Sync carefully - example workflow (adapt as needed):
-git pull --rebase
-# If conflicts in .beads/issues.jsonl, resolve thoughtfully:
-#   - git checkout --theirs .beads/issues.jsonl (accept remote)
-#   - bd import -i .beads/issues.jsonl (re-import)
-#   - Or manual merge, then import
-bd sync  # Export/import/verify
-git push
-# Repeat pull/push if needed until clean
-
-# 5. Verify clean state
-git status
-
-# 6. Choose next work
-bd ready --json
-bd show bd-44 --json
-```
-
-**Then provide the user with:**
-
-- Summary of what was completed this session
-- What issues were filed for follow-up
-- Status of quality gates (all passing / issues filed)
-- Recommended prompt for next session
-
-### Agent Session Workflow
-
-**IMPORTANT for AI agents:** When you finish making issue changes, always run:
-
-```bash
-bd sync
-```
-
-This immediately:
-
-1. Exports pending changes to JSONL (no 30s wait)
-2. Commits to git
-3. Pulls from remote
-4. Imports any updates
-5. Pushes to remote
-
-**Example agent session:**
-
-```bash
-# Make multiple changes (batched in 30-second window)
-bd create "Fix bug" -p 1
-bd create "Add tests" -p 1
-bd update bd-42 --status in_progress
-bd close bd-40 --reason "Completed"
-
-# Force immediate sync at end of session
-bd sync
-
-# Now safe to end session - everything is committed and pushed
-```
-
-**Why this matters:**
-
-- Without `bd sync`, changes sit in 30-second debounce window
-- User might think you pushed but JSONL is still dirty
-- `bd sync` forces immediate flush/commit/push
-
-**STRONGLY RECOMMENDED: Install git hooks for automatic sync** (prevents stale JSONL problems):
-
-```bash
-# One-time setup - run this in each beads workspace
-bd hooks install
-```
-
-This installs:
-
-- **pre-commit** - Flushes pending changes immediately before commit (bypasses 30s debounce)
-- **post-merge** - Imports updated JSONL after pull/merge (guaranteed sync)
-- **pre-push** - Exports database to JSONL before push (prevents stale JSONL from reaching remote)
-- **post-checkout** - Imports JSONL after branch checkout (ensures consistency)
-
-**Why git hooks matter:**
-Without the pre-push hook, you can have database changes committed locally but stale JSONL pushed to remote, causing multi-workspace divergence. The hooks guarantee DB ↔ JSONL consistency.
-
-**Note:** Hooks are embedded in the bd binary and work for all bd users (not just source repo users).
+See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for detailed workflows, testing patterns, and operational procedures.
 
 
 
@@ -590,53 +484,23 @@ bd dep tree bd-8  # Show 1.0 epic dependencies
 
 
 
-## Common Tasks
+## Common Development Tasks
 
-### Adding a New Command
+See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for detailed instructions on:
 
-1. Create file in `cmd/bd/`
-2. Add to root command in `cmd/bd/main.go`
-3. Implement with Cobra framework
-4. Add `--json` flag for agent use
-5. Add tests in `cmd/bd/*_test.go`
-6. Document in README.md
-
-### Adding Storage Features
-
-1. Update schema in `internal/storage/sqlite/schema.go`
-2. Add migration if needed
-3. Update `internal/types/types.go` if new types
-4. Implement in `internal/storage/sqlite/sqlite.go`
-5. Add tests
-6. Update export/import in `cmd/bd/export.go` and `cmd/bd/import.go`
-
-### Adding Examples
-
-1. Create directory in `examples/`
-2. Add README.md explaining the example
-3. Include working code
-4. Link from `examples/README.md`
-5. Mention in main README.md
-
-## Questions?
-
-- Check existing issues: `bd list`
-- Look at recent commits: `git log --oneline -20`
-- Read the docs: README.md, ADVANCED.md, EXTENDING.md
-- Create an issue if unsure: `bd create "Question: ..." -t task -p 2`
-
-## Important Files
-
-- **README.md** - Main documentation (keep this updated!)
-- **EXTENDING.md** - Database extension guide
-- **ADVANCED.md** - JSONL format analysis
-- **CONTRIBUTING.md** - Contribution guidelines
-- **SECURITY.md** - Security policy
+- Adding new commands
+- Adding storage features
+- Adding examples
+- Building and testing
+- Version management
+- Release process
 
 ## Pro Tips for Agents
 
 - Always use `--json` flags for programmatic use
 - **Always run `bd sync` at end of session** to flush/commit/push immediately
+- **Check `bd info --whats-new` at session start** if bd was recently upgraded
+- **Run `bd hooks install`** if `bd info` warns about outdated git hooks
 - Link discoveries with `discovered-from` to maintain context
 - Check `bd ready` before asking "what next?"
 - Auto-sync batches changes in 30-second window - use `bd sync` to force immediate flush
@@ -649,125 +513,15 @@ bd dep tree bd-8  # Show 1.0 epic dependencies
 
 ### Checking GitHub Issues and PRs
 
-**IMPORTANT**: When asked to check GitHub issues or PRs, use command-line tools like `gh` instead of browser/playwright tools.
+Use `gh` CLI tools for checking issues/PRs (see [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for details).
 
-**Preferred approach:**
+## Building, Testing, Versioning, and Releases
 
-```bash
-# List open issues with details
-gh issue list --limit 30
+See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for complete details on:
 
-# List open PRs
-gh pr list --limit 30
-
-# View specific issue
-gh issue view 201
-```
-
-**Then provide an in-conversation summary** highlighting:
-
-- Urgent/critical issues (regressions, bugs, broken builds)
-- Common themes or patterns
-- Feature requests with high engagement
-- Items that need immediate attention
-
-**Why this matters:**
-
-- Browser tools consume more tokens and are slower
-- CLI summaries are easier to scan and discuss
-- Keeps the conversation focused and efficient
-- Better for quick triage and prioritization
-
-**Do NOT use:** `browser_navigate`, `browser_snapshot`, or other playwright tools for GitHub PR/issue reviews unless specifically requested by the user.
-
-## Building and Testing
-
-```bash
-# Build
-go build -o bd ./cmd/bd
-
-# Test (short - for local development)
-go test -short ./...
-
-# Test with coverage (full tests - for CI)
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-
-# Run locally
-./bd init --prefix test
-./bd create "Test issue" -p 1
-./bd ready
-```
-
-## Version Management
-
-**IMPORTANT**: When the user asks to "bump the version" or mentions a new version number (e.g., "bump to 0.9.3"), use the version bump script:
-
-```bash
-# Preview changes (shows diff, doesn't commit)
-./scripts/bump-version.sh 0.9.3
-
-# Auto-commit the version bump
-./scripts/bump-version.sh 0.9.3 --commit
-git push origin main
-```
-
-**What it does:**
-
-- Updates ALL version files (CLI, plugin, MCP server, docs) in one command
-- Validates semantic versioning format
-- Shows diff preview
-- Verifies all versions match after update
-- Creates standardized commit message
-
-**User will typically say:**
-
-- "Bump to 0.9.3"
-- "Update version to 1.0.0"
-- "Rev the project to 0.9.4"
-- "Increment the version"
-
-**You should:**
-
-1. Run `./scripts/bump-version.sh <version> --commit`
-2. Push to GitHub
-3. Confirm all versions updated correctly
-
-**Files updated automatically:**
-
-- `cmd/bd/version.go` - CLI version
-- `.claude-plugin/plugin.json` - Plugin version
-- `.claude-plugin/marketplace.json` - Marketplace version
-- `integrations/beads-mcp/pyproject.toml` - MCP server version
-- `README.md` - Documentation version
-- `PLUGIN.md` - Version requirements
-
-**Why this matters:** We had version mismatches (bd-66) when only `version.go` was updated. This script prevents that by updating all components atomically.
-
-See `scripts/README.md` for more details.
-
-## Release Process (Maintainers)
-
-**Automated (Recommended):**
-
-```bash
-# One command to do everything (version bump, tests, tag, Homebrew update, local install)
-./scripts/release.sh 0.9.3
-```
-
-This handles the entire release workflow automatically, including waiting ~5 minutes for GitHub Actions to build release artifacts. See [scripts/README.md](scripts/README.md) for details.
-
-**Manual (Step-by-Step):**
-
-1. Bump version: `./scripts/bump-version.sh <version> --commit`
-2. Update CHANGELOG.md with release notes
-3. Run tests: `go test -short ./...` (CI runs full suite)
-4. Push version bump: `git push origin main`
-5. Tag release: `git tag v<version> && git push origin v<version>`
-6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)
-7. Verify: `brew update && brew upgrade bd && bd version`
-
-See [docs/RELEASING.md](docs/RELEASING.md) for complete manual instructions.
+- Building and testing (`go build`, `go test`)
+- Version management (`./scripts/bump-version.sh`)
+- Release process (`./scripts/release.sh`)
 
 ---
 
@@ -817,8 +571,8 @@ bd ready --json
 **Create new issues:**
 
 ```bash
-bd create "Issue title" -t bug|feature|task -p 0-4 --json
-bd create "Issue title" -p 1 --deps discovered-from:bd-123 --json
+bd create "Issue title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
+bd create "Issue title" --description="What this issue is about" -p 1 --deps discovered-from:bd-123 --json
 ```
 
 **Claim and update:**
@@ -856,7 +610,7 @@ bd close bd-42 --reason "Completed" --json
 2. **Claim your task**: `bd update <id> --status in_progress`
 3. **Work on it**: Implement, test, document
 4. **Discover new work?** Create linked issue:
-   - `bd create "Found bug" -p 1 --deps discovered-from:<parent-id>`
+   - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
 5. **Complete**: `bd close <id> --reason "Done"`
 
 ### Auto-Sync

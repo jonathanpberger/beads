@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/pprof"
 	"runtime/trace"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -60,29 +63,44 @@ var (
 	daemonClient *rpc.Client // RPC client when daemon is running
 	noDaemon     bool        // Force direct mode (no daemon)
 
+	// Signal-aware context for graceful cancellation
+	rootCtx    context.Context
+	rootCancel context.CancelFunc
+
 	// Auto-flush state
 	autoFlushEnabled  = true  // Can be disabled with --no-auto-flush
-	isDirty           = false // Tracks if DB has changes needing export
-	needsFullExport   = false // Set to true when IDs change (e.g., rename-prefix)
+	isDirty           = false // Tracks if DB has changes needing export (used by legacy code)
+	needsFullExport   = false // Set to true when IDs change (used by legacy code)
 	flushMutex        sync.Mutex
-	flushTimer        *time.Timer
-	storeMutex        sync.Mutex // Protects store access from background goroutine
-	storeActive       = false    // Tracks if store is available
-	flushFailureCount = 0        // Consecutive flush failures
-	lastFlushError    error      // Last flush error for debugging
+	flushTimer        *time.Timer // DEPRECATED: Use flushManager instead
+	storeMutex        sync.Mutex  // Protects store access from background goroutine
+	storeActive       = false     // Tracks if store is available
+	flushFailureCount = 0         // Consecutive flush failures
+	lastFlushError    error       // Last flush error for debugging
+
+	// Auto-flush manager (replaces timer-based approach to fix bd-52)
+	flushManager *FlushManager
 
 	// Auto-import state
 	autoImportEnabled = true // Can be disabled with --no-auto-import
+
+	// Version upgrade tracking (bd-loka)
+	versionUpgradeDetected = false // Set to true if bd version changed since last run
+	previousVersion        = ""    // The last bd version user had (empty = first run or unknown)
+	upgradeAcknowledged    = false // Set to true after showing upgrade notification once per session
 )
 
 var (
 	noAutoFlush  bool
 	noAutoImport bool
 	sandboxMode  bool
+	allowStale   bool // Use --allow-stale: skip staleness check (emergency escape hatch)
 	noDb         bool // Use --no-db mode: load from JSONL, write back after each command
 	profileEnabled bool
 	profileFile    *os.File
 	traceFile      *os.File
+	verboseFlag    bool // Enable verbose/debug output
+	quietFlag      bool // Suppress non-essential output
 )
 
 func init() {
@@ -99,11 +117,14 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&noAutoFlush, "no-auto-flush", false, "Disable automatic JSONL sync after CRUD operations")
 	rootCmd.PersistentFlags().BoolVar(&noAutoImport, "no-auto-import", false, "Disable automatic JSONL import when newer than DB")
 	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables daemon and auto-sync")
+	rootCmd.PersistentFlags().BoolVar(&allowStale, "allow-stale", false, "Allow operations on potentially stale data (skip staleness check)")
 	rootCmd.PersistentFlags().BoolVar(&noDb, "no-db", false, "Use no-db mode: load from JSONL, no SQLite")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
+	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
+	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
 
 	// Add --version flag to root command (same behavior as version subcommand)
-	rootCmd.Flags().BoolP("version", "v", false, "Print version information")
+	rootCmd.Flags().BoolP("version", "V", false, "Print version information")
 }
 
 var rootCmd = &cobra.Command{
@@ -120,6 +141,13 @@ var rootCmd = &cobra.Command{
 		_ = cmd.Help()
 	},
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// Set up signal-aware context for graceful cancellation
+		rootCtx, rootCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+		// Apply verbosity flags early (before any output)
+		debug.SetVerbose(verboseFlag)
+		debug.SetQuiet(quietFlag)
+
 		// Apply viper configuration if flags weren't explicitly set
 		// Priority: flags > viper (config file + env vars) > defaults
 		// Do this BEFORE early-return so init/version/help respect config
@@ -181,8 +209,25 @@ var rootCmd = &cobra.Command{
 			"version",
 			"zsh",
 		}
-		if slices.Contains(noDbCommands, cmd.Name()) {
+		// Check both the command name and parent command name for subcommands
+		cmdName := cmd.Name()
+		if cmd.Parent() != nil {
+			parentName := cmd.Parent().Name()
+			if slices.Contains(noDbCommands, parentName) {
+				return
+			}
+		}
+		if slices.Contains(noDbCommands, cmdName) {
 			return
+		}
+
+		// Auto-detect sandboxed environment (bd-u3t: Phase 2 for GH #353)
+		// Only auto-enable if user hasn't explicitly set --sandbox or --no-daemon
+		if !cmd.Flags().Changed("sandbox") && !cmd.Flags().Changed("no-daemon") {
+			if isSandboxed() {
+				sandboxMode = true
+				fmt.Fprintf(os.Stderr, "ℹ️  Sandbox detected, using direct mode\n")
+			}
 		}
 
 		// If sandbox mode is set, enable all sandbox flags
@@ -232,8 +277,10 @@ var rootCmd = &cobra.Command{
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
 				dbPath = foundDB
 			} else {
-				// Allow import command to auto-initialize database if missing
-				if cmd.Name() != "import" {
+				// Allow some commands to run without a database
+				// - import: auto-initializes database if missing
+				// - setup: creates editor integration files (no DB needed)
+				if cmd.Name() != "import" && cmd.Name() != "setup" {
 					// No database found - error out instead of falling back to ~/.beads
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: run 'bd init' to create a database in the current directory\n")
@@ -241,7 +288,7 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "      or set BEADS_DB to point to your database file (deprecated)\n")
 					os.Exit(1)
 				}
-				// For import command, set default database path
+				// For import/setup commands, set default database path
 				dbPath = filepath.Join(".beads", beads.CanonicalDatabaseName)
 			}
 		}
@@ -258,6 +305,10 @@ var rootCmd = &cobra.Command{
 				actor = "unknown"
 			}
 		}
+
+		// Track bd version changes (bd-loka)
+		// Best-effort tracking - failures are silent
+		trackBdVersion()
 
 		// Initialize daemon status
 		socketPath := getSocketPath()
@@ -432,9 +483,14 @@ var rootCmd = &cobra.Command{
 			debug.Logf("using direct mode (reason: %s)", daemonStatus.FallbackReason)
 		}
 
+		// Auto-migrate database on version bump (bd-jgxi)
+		// Do this AFTER daemon check but BEFORE opening database for main operation
+		// This ensures: 1) no daemon has DB open, 2) we don't open DB twice
+		autoMigrateOnVersionBump(dbPath)
+
 		// Fall back to direct storage access
 		var err error
-		store, err = sqlite.New(dbPath)
+		store, err = sqlite.New(rootCtx, dbPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 			os.Exit(1)
@@ -444,6 +500,12 @@ var rootCmd = &cobra.Command{
 		storeMutex.Lock()
 		storeActive = true
 		storeMutex.Unlock()
+
+		// Initialize flush manager (fixes bd-52: race condition in auto-flush)
+		// For in-process test scenarios where commands run multiple times,
+		// we create a new manager each time. Shutdown() is idempotent so
+		// PostRun can safely shutdown whichever manager is active.
+		flushManager = NewFlushManager(autoFlushEnabled, getDebounceDuration())
 
 		// Warn if multiple databases detected in directory hierarchy
 		warnMultipleDatabases(dbPath)
@@ -502,22 +564,11 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Otherwise, handle direct mode cleanup
-		// Flush any pending changes before closing
-		flushMutex.Lock()
-		needsFlush := isDirty && autoFlushEnabled
-		if needsFlush {
-			// Cancel timer and flush immediately
-			if flushTimer != nil {
-				flushTimer.Stop()
-				flushTimer = nil
+		// Shutdown flush manager (performs final flush if needed)
+		if flushManager != nil {
+			if err := flushManager.Shutdown(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: flush manager shutdown error: %v\n", err)
 			}
-			// Don't clear isDirty or needsFullExport here - let flushToJSONL do it
-		}
-		flushMutex.Unlock()
-
-		if needsFlush {
-			// Call the shared flush function (handles both incremental and full export)
-			flushToJSONL()
 		}
 
 		// Signal that store is closing (prevents background flush from accessing closed store)
@@ -530,6 +581,11 @@ var rootCmd = &cobra.Command{
 		}
 		if profileFile != nil { pprof.StopCPUProfile(); _ = profileFile.Close() }
 		if traceFile != nil { trace.Stop(); _ = traceFile.Close() }
+
+		// Cancel the signal context to clean up resources
+		if rootCancel != nil {
+			rootCancel()
+		}
 	},
 }
 

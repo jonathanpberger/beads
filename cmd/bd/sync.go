@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -33,7 +34,7 @@ Use --import-only to just import from JSONL (useful after git pull).
 Use --status to show diff between sync branch and main branch.
 Use --merge to merge the sync branch back to main branch.`,
 	Run: func(cmd *cobra.Command, _ []string) {
-		ctx := context.Background()
+		ctx := rootCtx
 
 		message, _ := cmd.Flags().GetString("message")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -126,6 +127,21 @@ Use --merge to merge the sync branch back to main branch.`,
 		if dryRun {
 			fmt.Println("→ [DRY RUN] Would export pending changes to JSONL")
 		} else {
+			// Smart conflict resolution: if JSONL content changed, auto-import first
+			// Use content-based check (not mtime) to avoid git resurrection bug (bd-khnb)
+			if err := ensureStoreActive(); err == nil && store != nil {
+				// Use getRepoKeyForPath for multi-repo support (bd-ar2.10, bd-ar2.11)
+			repoKey := getRepoKeyForPath(jsonlPath)
+			if hasJSONLChanged(ctx, store, jsonlPath, repoKey) {
+					fmt.Println("→ JSONL content changed, importing first...")
+					if err := importFromJSONL(ctx, jsonlPath, renameOnImport); err != nil {
+						fmt.Fprintf(os.Stderr, "Error auto-importing: %v\n", err)
+						os.Exit(1)
+					}
+					fmt.Println("✓ Auto-import complete")
+				}
+			}
+
 			// Pre-export integrity checks
 			if err := ensureStoreActive(); err == nil && store != nil {
 				if err := validatePreExport(ctx, store, jsonlPath); err != nil {
@@ -183,11 +199,54 @@ Use --merge to merge the sync branch back to main branch.`,
 			if dryRun {
 				fmt.Println("→ [DRY RUN] Would pull from remote")
 			} else {
+				// Check merge driver configuration before pulling
+				checkMergeDriverConfig()
+
 				fmt.Println("→ Pulling from remote...")
 				if err := gitPull(ctx); err != nil {
-					fmt.Fprintf(os.Stderr, "Error pulling: %v\n", err)
-					fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
-					os.Exit(1)
+					// Check if it's a rebase conflict on beads.jsonl that we can auto-resolve
+					if isInRebase() && hasJSONLConflict() {
+						fmt.Println("→ Auto-resolving JSONL merge conflict...")
+
+						// Export clean JSONL from DB (database is source of truth)
+						if exportErr := exportToJSONL(ctx, jsonlPath); exportErr != nil {
+							fmt.Fprintf(os.Stderr, "Error: failed to export for conflict resolution: %v\n", exportErr)
+							fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+							os.Exit(1)
+						}
+
+						// Mark conflict as resolved
+						addCmd := exec.CommandContext(ctx, "git", "add", jsonlPath)
+						if addErr := addCmd.Run(); addErr != nil {
+							fmt.Fprintf(os.Stderr, "Error: failed to mark conflict resolved: %v\n", addErr)
+							fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+							os.Exit(1)
+						}
+
+						// Continue rebase
+						if continueErr := runGitRebaseContinue(ctx); continueErr != nil {
+							fmt.Fprintf(os.Stderr, "Error: failed to continue rebase: %v\n", continueErr)
+							fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+							os.Exit(1)
+						}
+
+						fmt.Println("✓ Auto-resolved JSONL conflict")
+					} else {
+						// Not an auto-resolvable conflict, fail with original error
+						fmt.Fprintf(os.Stderr, "Error pulling: %v\n", err)
+
+						// Check if this looks like a merge driver failure
+						errStr := err.Error()
+						if strings.Contains(errStr, "merge driver") ||
+						   strings.Contains(errStr, "no such file or directory") ||
+						   strings.Contains(errStr, "MERGE DRIVER INVOKED") {
+							fmt.Fprintf(os.Stderr, "\nThis may be caused by an incorrect merge driver configuration.\n")
+							fmt.Fprintf(os.Stderr, "Fix: bd doctor --fix\n\n")
+						}
+
+						fmt.Fprintf(os.Stderr, "Hint: resolve conflicts manually and run 'bd import' then 'bd sync' again\n")
+						os.Exit(1)
+					}
 				}
 
 				// Count issues before import for validation
@@ -410,8 +469,88 @@ func hasGitRemote(ctx context.Context) bool {
 	return len(strings.TrimSpace(string(output))) > 0
 }
 
+// isInRebase checks if we're currently in a git rebase state
+func isInRebase() bool {
+	// Check for rebase-merge directory (interactive rebase)
+	if _, err := os.Stat(".git/rebase-merge"); err == nil {
+		return true
+	}
+	// Check for rebase-apply directory (non-interactive rebase)
+	if _, err := os.Stat(".git/rebase-apply"); err == nil {
+		return true
+	}
+	return false
+}
+
+// hasJSONLConflict checks if beads.jsonl has a merge conflict
+// Returns true only if beads.jsonl is the only file in conflict
+func hasJSONLConflict() bool {
+	cmd := exec.Command("git", "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	var hasJSONLConflict bool
+	var hasOtherConflict bool
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 3 {
+			continue
+		}
+
+		// Check for unmerged status codes (UU = both modified, AA = both added, etc.)
+		status := line[:2]
+		if status == "UU" || status == "AA" || status == "DD" ||
+		   status == "AU" || status == "UA" || status == "DU" || status == "UD" {
+			filepath := strings.TrimSpace(line[3:])
+
+			if strings.HasSuffix(filepath, "beads.jsonl") {
+				hasJSONLConflict = true
+			} else {
+				hasOtherConflict = true
+			}
+		}
+	}
+
+	// Only return true if ONLY beads.jsonl has a conflict
+	return hasJSONLConflict && !hasOtherConflict
+}
+
+// runGitRebaseContinue continues a rebase after resolving conflicts
+func runGitRebaseContinue(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "git", "rebase", "--continue")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git rebase --continue failed: %w\n%s", err, output)
+	}
+	return nil
+}
+
 // gitPull pulls from the current branch's upstream
 // Returns nil if no remote configured (local-only mode)
+func checkMergeDriverConfig() {
+	// Get current merge driver configuration
+	cmd := exec.Command("git", "config", "merge.beads.driver")
+	output, err := cmd.Output()
+	if err != nil {
+		// No merge driver configured - this is OK, user may not need it
+		return
+	}
+
+	currentConfig := strings.TrimSpace(string(output))
+
+	// Check if using old incorrect placeholders
+	if strings.Contains(currentConfig, "%L") || strings.Contains(currentConfig, "%R") {
+		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: Git merge driver is misconfigured!\n")
+		fmt.Fprintf(os.Stderr, "   Current: %s\n", currentConfig)
+		fmt.Fprintf(os.Stderr, "   Problem: Git only supports %%O (base), %%A (current), %%B (other)\n")
+		fmt.Fprintf(os.Stderr, "            Using %%L/%%R will cause merge failures!\n")
+		fmt.Fprintf(os.Stderr, "\n   Fix now: bd doctor --fix\n")
+		fmt.Fprintf(os.Stderr, "   Or manually: git config merge.beads.driver \"bd merge %%A %%O %%A %%B\"\n\n")
+	}
+}
+
 func gitPull(ctx context.Context) error {
 	// Check if any remote exists (bd-biwp: support local-only repos)
 	if !hasGitRemote(ctx) {
@@ -419,7 +558,8 @@ func gitPull(ctx context.Context) error {
 	}
 	
 	// Get current branch name
-	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	// Use symbolic-ref to work in fresh repos without commits (bd-flil)
+	branchCmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "HEAD")
 	branchOutput, err := branchCmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to get current branch: %w", err)
@@ -590,6 +730,30 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 	// Clear auto-flush state
 	clearAutoFlushState()
 
+	// Update last_import_hash metadata to enable content-based staleness detection (bd-khnb fix)
+	// After export, database and JSONL are in sync, so update hash to prevent unnecessary auto-import
+	if currentHash, err := computeJSONLHash(jsonlPath); err == nil {
+		if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
+			// Non-fatal warning: Metadata update failures are intentionally non-fatal to prevent blocking
+			// successful exports. System degrades gracefully to mtime-based staleness detection if metadata
+			// is unavailable. This ensures export operations always succeed even if metadata storage fails.
+			fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_hash: %v\n", err)
+		}
+		exportTime := time.Now().Format(time.RFC3339)
+		if err := store.SetMetadata(ctx, "last_import_time", exportTime); err != nil {
+			// Non-fatal warning (see above comment about graceful degradation)
+			fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_time: %v\n", err)
+		}
+		// Store mtime for fast-path optimization in hasJSONLChanged (bd-3bg)
+		if jsonlInfo, statErr := os.Stat(jsonlPath); statErr == nil {
+			mtimeStr := fmt.Sprintf("%d", jsonlInfo.ModTime().Unix())
+			if err := store.SetMetadata(ctx, "last_import_mtime", mtimeStr); err != nil {
+				// Non-fatal warning (see above comment about graceful degradation)
+				fmt.Fprintf(os.Stderr, "Warning: failed to update last_import_mtime: %v\n", err)
+			}
+		}
+	}
+
 	// Update database mtime to be >= JSONL mtime (fixes #278, #301, #321)
 	// This prevents validatePreExport from incorrectly blocking on next export
 	beadsDir := filepath.Dir(jsonlPath)
@@ -603,8 +767,9 @@ func exportToJSONL(ctx context.Context, jsonlPath string) error {
 }
 
 // getCurrentBranch returns the name of the current git branch
+// Uses symbolic-ref instead of rev-parse to work in fresh repos without commits (bd-flil)
 func getCurrentBranch(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "HEAD")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get current branch: %w", err)
@@ -619,9 +784,9 @@ func getSyncBranch(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to initialize store: %w", err)
 	}
 
-	syncBranch, err := store.GetConfig(ctx, "sync.branch")
+	syncBranch, err := syncbranch.Get(ctx, store)
 	if err != nil {
-		return "", fmt.Errorf("failed to get sync.branch config: %w", err)
+		return "", fmt.Errorf("failed to get sync branch config: %w", err)
 	}
 
 	if syncBranch == "" {
@@ -787,7 +952,7 @@ func mergeSyncBranch(ctx context.Context, dryRun bool) error {
 	// Suggest next steps
 	fmt.Println("\nNext steps:")
 	fmt.Println("1. Review the merged changes")
-	fmt.Println("2. Run 'bd import' to sync the database with merged JSONL")
+	fmt.Println("2. Run 'bd sync --import-only' to sync the database with merged JSONL")
 	fmt.Println("3. Run 'bd sync' to push changes to remote")
 
 	return nil

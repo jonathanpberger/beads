@@ -131,16 +131,20 @@ func (m *MemoryStorage) GetAllIssues() []*types.Issue {
 
 // extractPrefixAndNumber extracts prefix and number from issue ID like "bd-123" -> ("bd", 123)
 func extractPrefixAndNumber(id string) (string, int) {
-	parts := strings.SplitN(id, "-", 2)
-	if len(parts) != 2 {
+	lastDash := strings.LastIndex(id, "-")
+	if lastDash == -1 {
 		return "", 0
 	}
+
+	prefix := id[:lastDash]
+	suffix := id[lastDash+1:]
+
 	var num int
-	_, err := fmt.Sscanf(parts[1], "%d", &num)
+	_, err := fmt.Sscanf(suffix, "%d", &num)
 	if err != nil {
 		return "", 0
 	}
-	return parts[0], num
+	return prefix, num
 }
 
 // CreateIssue creates a new issue
@@ -787,6 +791,19 @@ func (m *MemoryStorage) GetLabels(ctx context.Context, issueID string) ([]string
 	return m.labels[issueID], nil
 }
 
+func (m *MemoryStorage) GetLabelsForIssues(ctx context.Context, issueIDs []string) (map[string][]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string][]string)
+	for _, issueID := range issueIDs {
+		if labels, exists := m.labels[issueID]; exists {
+			result[issueID] = labels
+		}
+	}
+	return result, nil
+}
+
 func (m *MemoryStorage) GetIssuesByLabel(ctx context.Context, label string) ([]*types.Issue, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -893,6 +910,19 @@ func (m *MemoryStorage) GetIssueComments(ctx context.Context, issueID string) ([
 	defer m.mu.RUnlock()
 
 	return m.comments[issueID], nil
+}
+
+func (m *MemoryStorage) GetCommentsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Comment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string][]*types.Comment)
+	for _, issueID := range issueIDs {
+		if comments, exists := m.comments[issueID]; exists {
+			result[issueID] = comments
+		}
+	}
+	return result, nil
 }
 
 func (m *MemoryStorage) GetStatistics(ctx context.Context) (*types.Statistics, error) {

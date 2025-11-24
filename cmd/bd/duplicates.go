@@ -1,6 +1,5 @@
 package main
 import (
-	"context"
 	"fmt"
 	"os"
 	"regexp"
@@ -32,7 +31,17 @@ Example:
 		autoMerge, _ := cmd.Flags().GetBool("auto-merge")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		// Use global jsonOutput set by PersistentPreRun
-		ctx := context.Background()
+		ctx := rootCtx
+
+		// Check database freshness before reading (bd-2q6d, bd-c4rq)
+		// Skip check when using daemon (daemon auto-imports on staleness)
+		if daemonClient == nil {
+			if err := ensureDatabaseFresh(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		// Get all issues
 		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {
@@ -72,14 +81,18 @@ Example:
 					sources = append(sources, issue.ID)
 				}
 			}
-			// TODO: performMerge implementation pending
-			// For now, just generate the command suggestion
-			cmd := fmt.Sprintf("bd merge %s --into %s", strings.Join(sources, " "), target.ID)
+			// Generate actionable command suggestion
+			cmd := fmt.Sprintf("# Duplicate: %s (same content as %s)\n# Suggested action: bd close %s && bd dep add %s %s --type related",
+				strings.Join(sources, " "),
+				target.ID,
+				strings.Join(sources, " "),
+				strings.Join(sources, " "),
+				target.ID)
 			mergeCommands = append(mergeCommands, cmd)
 			
 			if autoMerge || dryRun {
 				if !dryRun {
-					// TODO: Call performMerge when implemented
+					// TODO(bd-hdt): Call performMerge when implemented
 					fmt.Fprintf(os.Stderr, "Auto-merge not yet fully implemented. Use suggested commands instead.\n")
 				}
 			}
@@ -124,8 +137,9 @@ Example:
 						sources = append(sources, issue.ID)
 					}
 				}
-				fmt.Printf("  %s bd merge %s --into %s\n\n",
-					cyan("Suggested:"), strings.Join(sources, " "), target.ID)
+				fmt.Printf("  %s Duplicate: %s (same content as %s)\n", cyan("Note:"), strings.Join(sources, " "), target.ID)
+				fmt.Printf("  %s bd close %s && bd dep add %s %s --type related\n\n",
+					cyan("Suggested:"), strings.Join(sources, " "), strings.Join(sources, " "), target.ID)
 			}
 			if autoMerge {
 				if dryRun {
@@ -235,11 +249,12 @@ func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int
 			}
 		}
 		result = append(result, map[string]interface{}{
-			"title":               group[0].Title,
-			"issues":              issues,
-			"suggested_target":    target.ID,
-			"suggested_sources":   sources,
-			"suggested_merge_cmd": fmt.Sprintf("bd merge %s --into %s", strings.Join(sources, " "), target.ID),
+			"title":             group[0].Title,
+			"issues":            issues,
+			"suggested_target":  target.ID,
+			"suggested_sources": sources,
+			"suggested_action":  fmt.Sprintf("bd close %s && bd dep add %s %s --type related", strings.Join(sources, " "), strings.Join(sources, " "), target.ID),
+			"note":              fmt.Sprintf("Duplicate: %s (same content as %s)", strings.Join(sources, " "), target.ID),
 		})
 	}
 	return result

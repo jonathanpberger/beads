@@ -156,10 +156,30 @@ echo "BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions" >> AGE
 
 **Git merge driver:** During `bd init`, beads configures git to use `bd merge` for intelligent JSONL merging. This prevents conflicts when multiple branches modify issues. Skip with `--skip-merge-driver` if needed. To configure manually later:
 ```bash
-git config merge.beads.driver "bd merge %A %O %L %R"
+git config merge.beads.driver "bd merge %A %O %A %B"
 git config merge.beads.name "bd JSONL merge driver"
 echo ".beads/beads.jsonl merge=beads" >> .gitattributes
 ```
+
+### Files Created by `bd init`
+
+**`bd init` creates these files in your repository:**
+
+**Should be committed to git:**
+- `.gitattributes` - Configures git merge driver for intelligent JSONL merging (critical for team collaboration)
+- `.beads/beads.jsonl` - Issue data in JSONL format (source of truth, synced via git)
+- `.beads/config.yaml` - Repository configuration template
+- `.beads/README.md` - Documentation about beads for repository visitors
+- `.beads/metadata.json` - Database metadata
+
+**Should be in `.gitignore` (local-only):**
+- `.beads/beads.db` - SQLite cache (auto-synced with JSONL)
+- `.beads/beads.db-*` - SQLite journal files
+- `.beads/bd.sock` / `.beads/bd.pipe` - Daemon communication socket
+- `.beads/.exclusive-lock` - Daemon lock file
+- `.git/beads-worktrees/` - Git worktrees (only created when using protected branch workflows)
+
+The `.gitignore` entries are automatically created inside `.beads/.gitignore` by `bd init`, but your project's root `.gitignore` should also exclude the database and daemon files if you want to keep your git status clean.
 
 **Using devcontainers?** Open the repository in a devcontainer (GitHub Codespaces or VS Code Remote Containers) and bd will be automatically installed with git hooks configured. See [.devcontainer/README.md](.devcontainer/README.md) for details.
 
@@ -225,7 +245,7 @@ This pattern has proven invaluable for maintaining database hygiene and preventi
 **5. Choose next work**
 - Provide a formatted prompt for the next session with context
 
-See the ["Landing the Plane"](AGENTS.md#landing-the-plane) section in this project's `AGENTS.md` for a complete example you can adapt. The key insight: explicitly reminding agents to maintain issue tracker hygiene prevents the common problem of agents creating issues during work but forgetting to sync them at session end.
+See the ["Landing the Plane"](AGENT_INSTRUCTIONS.md#landing-the-plane) section in this project's documentation for a complete example you can adapt. The key insight: explicitly reminding agents to maintain issue tracker hygiene prevents the common problem of agents creating issues during work but forgetting to sync them at session end.
 
 ## The Magic: Distributed Database via Git
 
@@ -760,7 +780,7 @@ For advanced usage, see:
 
 ### Third-Party Tools
 
-- **[Beadster](https://apps.apple.com/us/app/beadster-issue-tracking/id6754286462)** - Native macOS app for viewing and managing bd issues across multiple projects. Features a compact, always-on-top window for quick reference during development. Built by [@podviaznikov](https://github.com/podviaznikov).
+- **[beads-ui](https://github.com/mantoni/beads-ui)** - Local web interface with live updates, kanban board, and keyboard navigation. Zero-setup launch with `npx beads-ui start`. Built by [@mantoni](https://github.com/mantoni).
 
 Have you built something cool with bd? [Open an issue](https://github.com/steveyegge/beads/issues) to get it featured here!
 

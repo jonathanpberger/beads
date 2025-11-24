@@ -1,6 +1,5 @@
 package main
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -76,6 +75,10 @@ var readyCmd = &cobra.Command{
 				outputJSON(issues)
 				return
 			}
+
+			// Show upgrade notification if needed (bd-loka)
+			maybeShowUpgradeNotification()
+
 			if len(issues) == 0 {
 				yellow := color.New(color.FgYellow).SprintFunc()
 				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
@@ -97,7 +100,17 @@ var readyCmd = &cobra.Command{
 			return
 		}
 		// Direct mode
-		ctx := context.Background()
+		ctx := rootCtx
+
+		// Check database freshness before reading (bd-2q6d, bd-c4rq)
+		// Skip check when using daemon (daemon auto-imports on staleness)
+		if daemonClient == nil {
+			if err := ensureDatabaseFresh(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		issues, err := store.GetReadyWork(ctx, filter)
 		if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -122,6 +135,9 @@ var readyCmd = &cobra.Command{
 			outputJSON(issues)
 			return
 		}
+		// Show upgrade notification if needed (bd-loka)
+		maybeShowUpgradeNotification()
+
 		if len(issues) == 0 {
 			yellow := color.New(color.FgYellow).SprintFunc()
 			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
@@ -148,16 +164,16 @@ var blockedCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 		// If daemon is running but doesn't support this command, use direct storage
+		ctx := rootCtx
 		if daemonClient != nil && store == nil {
 			var err error
-			store, err = sqlite.New(dbPath)
+			store, err = sqlite.New(ctx, dbPath)
 			if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
 			os.Exit(1)
 			}
 			defer func() { _ = store.Close() }()
 			}
-			ctx := context.Background()
 		blocked, err := store.GetBlockedIssues(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -228,7 +244,7 @@ var statsCmd = &cobra.Command{
 			return
 		}
 		// Direct mode
-		ctx := context.Background()
+		ctx := rootCtx
 		stats, err := store.GetStatistics(ctx)
 		if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

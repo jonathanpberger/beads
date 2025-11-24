@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -37,6 +36,7 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		contributor, _ := cmd.Flags().GetBool("contributor")
 		team, _ := cmd.Flags().GetBool("team")
 		skipMergeDriver, _ := cmd.Flags().GetBool("skip-merge-driver")
+		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
 
 		// Initialize config (PersistentPreRun doesn't run for init command)
 		if err := config.Initialize(); err != nil {
@@ -162,6 +162,12 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 					// Non-fatal - continue anyway
 				}
 
+				// Create README.md
+				if err := createReadme(localBeadsDir); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to create README.md: %v\n", err)
+					// Non-fatal - continue anyway
+				}
+
 				if !quiet {
 					green := color.New(color.FgGreen).SprintFunc()
 					cyan := color.New(color.FgCyan).SprintFunc()
@@ -190,21 +196,30 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 			os.Exit(1)
 		}
 
-		store, err := sqlite.New(initDBPath)
+		ctx := rootCtx
+		store, err := sqlite.New(ctx, initDBPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to create database: %v\n", err)
 			os.Exit(1)
 		}
 
 		// Set the issue prefix in config
-		ctx := context.Background()
 		if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
 			_ = store.Close()
 			os.Exit(1)
 		}
 
-		// Set sync.branch if specified
+		// Set sync.branch: use explicit --branch flag, or auto-detect current branch
+		// This ensures bd sync --status works after bd init (bd-flil)
+		if branch == "" && isGitRepo() {
+			// Auto-detect current branch if not specified
+			currentBranch, err := getGitBranch()
+			if err == nil && currentBranch != "" {
+				branch = currentBranch
+			}
+		}
+
 		if branch != "" {
 			if err := syncbranch.Set(ctx, store, branch); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to set sync branch: %v\n", err)
@@ -263,6 +278,12 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 				fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
 				// Non-fatal - continue anyway
 			}
+
+			// Create README.md
+			if err := createReadme(localBeadsDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create README.md: %v\n", err)
+				// Non-fatal - continue anyway
+			}
 		}
 
 		// Check if git has existing issues to import (fresh clone scenario)
@@ -306,24 +327,22 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 		}
 
 		// Check if we're in a git repo and hooks aren't installed
-		// Do this BEFORE quiet mode return so hooks get installed for agents
-		if isGitRepo() && !hooksInstalled() {
-			if quiet {
-				// Auto-install hooks silently in quiet mode (best default for agents)
-				_ = installGitHooks() // Ignore errors in quiet mode
-			} else {
-				// Defer to interactive prompt below
+		// Install by default unless --skip-hooks is passed
+		if !skipHooks && isGitRepo() && !hooksInstalled() {
+			if err := installGitHooks(); err != nil && !quiet {
+				yellow := color.New(color.FgYellow).SprintFunc()
+				fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks: %v\n", yellow("⚠"), err)
+				fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", color.New(color.FgCyan).Sprint("bd doctor --fix"))
 			}
 		}
 
 		// Check if we're in a git repo and merge driver isn't configured
-		// Do this BEFORE quiet mode return so merge driver gets configured for agents
+		// Install by default unless --skip-merge-driver is passed
 		if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
-			if quiet {
-				// Auto-install merge driver silently in quiet mode (best default for agents)
-				_ = installMergeDriver() // Ignore errors in quiet mode
-			} else {
-				// Defer to interactive prompt below
+			if err := installMergeDriver(); err != nil && !quiet {
+				yellow := color.New(color.FgYellow).SprintFunc()
+				fmt.Fprintf(os.Stderr, "\n%s Failed to install merge driver: %v\n", yellow("⚠"), err)
+				fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", color.New(color.FgCyan).Sprint("bd doctor --fix"))
 			}
 		}
 
@@ -334,57 +353,34 @@ With --no-db: creates .beads/ directory and issues.jsonl file instead of SQLite 
 
 		green := color.New(color.FgGreen).SprintFunc()
 		cyan := color.New(color.FgCyan).SprintFunc()
-		yellow := color.New(color.FgYellow).SprintFunc()
 
 		fmt.Printf("\n%s bd initialized successfully!\n\n", green("✓"))
 		fmt.Printf("  Database: %s\n", cyan(initDBPath))
 		fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
 		fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-1, "+prefix+"-2, ..."))
-
-		// Interactive git hooks prompt for humans
-		if isGitRepo() && !hooksInstalled() {
-			fmt.Printf("%s Git hooks not installed\n", yellow("⚠"))
-			fmt.Printf("  Install git hooks to prevent race conditions between commits and auto-flush.\n")
-			fmt.Printf("  Run: %s\n\n", cyan("./examples/git-hooks/install.sh"))
-
-			// Prompt to install
-			fmt.Printf("Install git hooks now? [Y/n] ")
-			var response string
-			_, _ = fmt.Scanln(&response) // ignore EOF on empty input
-			response = strings.ToLower(strings.TrimSpace(response))
-
-			if response == "" || response == "y" || response == "yes" {
-				if err := installGitHooks(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error installing hooks: %v\n", err)
-					fmt.Printf("You can install manually with: %s\n\n", cyan("./examples/git-hooks/install.sh"))
-				} else {
-					fmt.Printf("%s Git hooks installed successfully!\n\n", green("✓"))
-				}
-			}
-		}
-
-		// Interactive git merge driver prompt for humans
-		if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
-			fmt.Printf("%s Git merge driver not configured\n", yellow("⚠"))
-			fmt.Printf("  bd merge provides intelligent JSONL merging to prevent conflicts.\n")
-			fmt.Printf("  This will configure git to use 'bd merge' for .beads/beads.jsonl\n\n")
-
-			// Prompt to install
-			fmt.Printf("Configure git merge driver now? [Y/n] ")
-			var response string
-			_, _ = fmt.Scanln(&response) // ignore EOF on empty input
-			response = strings.ToLower(strings.TrimSpace(response))
-
-			if response == "" || response == "y" || response == "yes" {
-				if err := installMergeDriver(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error configuring merge driver: %v\n", err)
-				} else {
-					fmt.Printf("%s Git merge driver configured successfully!\n\n", green("✓"))
-				}
-			}
-		}
-
 		fmt.Printf("Run %s to get started.\n\n", cyan("bd quickstart"))
+
+		// Run bd doctor diagnostics to catch setup issues early (bd-zwtq)
+		doctorResult := runDiagnostics(cwd)
+		// Check if there are any warnings or errors (not just critical failures)
+		hasIssues := false
+		for _, check := range doctorResult.Checks {
+			if check.Status != statusOK {
+				hasIssues = true
+				break
+			}
+		}
+		if hasIssues {
+			yellow := color.New(color.FgYellow).SprintFunc()
+			fmt.Printf("%s Setup incomplete. Some issues were detected:\n", yellow("⚠"))
+			// Show just the warnings/errors, not all checks
+			for _, check := range doctorResult.Checks {
+				if check.Status != statusOK {
+					fmt.Printf("  • %s: %s\n", check.Name, check.Message)
+				}
+			}
+			fmt.Printf("\nRun %s to see details and fix these issues.\n\n", cyan("bd doctor --fix"))
+		}
 	},
 }
 
@@ -394,7 +390,8 @@ func init() {
 	initCmd.Flags().StringP("branch", "b", "", "Git branch for beads commits (default: current branch)")
 	initCmd.Flags().Bool("contributor", false, "Run OSS contributor setup wizard")
 	initCmd.Flags().Bool("team", false, "Run team workflow setup wizard")
-	initCmd.Flags().Bool("skip-merge-driver", false, "Skip git merge driver setup (non-interactive)")
+	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
+	initCmd.Flags().Bool("skip-merge-driver", false, "Skip git merge driver setup")
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -755,12 +752,20 @@ exit 0
 	return nil
 }
 
-// mergeDriverInstalled checks if bd merge driver is configured
+// mergeDriverInstalled checks if bd merge driver is configured correctly
 func mergeDriverInstalled() bool {
 	// Check git config for merge driver
 	cmd := exec.Command("git", "config", "merge.beads.driver")
 	output, err := cmd.Output()
 	if err != nil || len(output) == 0 {
+		return false
+	}
+
+	// Check if using old invalid placeholders (%L/%R from versions <0.24.0)
+	// Git only supports %O (base), %A (current), %B (other)
+	driverConfig := strings.TrimSpace(string(output))
+	if strings.Contains(driverConfig, "%L") || strings.Contains(driverConfig, "%R") {
+		// Stale config with invalid placeholders - needs repair
 		return false
 	}
 
@@ -771,15 +776,18 @@ func mergeDriverInstalled() bool {
 		return false
 	}
 
-	// Look for beads JSONL merge attribute
-	return strings.Contains(string(content), ".beads/beads.jsonl") &&
+	// Look for beads JSONL merge attribute (either canonical or legacy filename)
+	hasCanonical := strings.Contains(string(content), ".beads/issues.jsonl") &&
 		strings.Contains(string(content), "merge=beads")
+	hasLegacy := strings.Contains(string(content), ".beads/beads.jsonl") &&
+		strings.Contains(string(content), "merge=beads")
+	return hasCanonical || hasLegacy
 }
 
 // installMergeDriver configures git to use bd merge for JSONL files
 func installMergeDriver() error {
 	// Configure git merge driver
-	cmd := exec.Command("git", "config", "merge.beads.driver", "bd merge %A %O %L %R")
+	cmd := exec.Command("git", "config", "merge.beads.driver", "bd merge %A %O %A %B")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to configure git merge driver: %w\n%s", err, output)
 	}
@@ -801,12 +809,14 @@ func installMergeDriver() error {
 	}
 
 	// Check if beads merge driver is already configured
-	hasBeadsMerge := strings.Contains(existingContent, ".beads/beads.jsonl") &&
+	// Check for either pattern (issues.jsonl is canonical, beads.jsonl is legacy)
+	hasBeadsMerge := (strings.Contains(existingContent, ".beads/issues.jsonl") ||
+		strings.Contains(existingContent, ".beads/beads.jsonl")) &&
 		strings.Contains(existingContent, "merge=beads")
 
 	if !hasBeadsMerge {
-		// Append beads merge driver configuration
-		beadsMergeAttr := "\n# Use bd merge for beads JSONL files\n.beads/beads.jsonl merge=beads\n"
+		// Append beads merge driver configuration (issues.jsonl is canonical)
+		beadsMergeAttr := "\n# Use bd merge for beads JSONL files\n.beads/issues.jsonl merge=beads\n"
 
 		newContent := existingContent
 		if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
@@ -958,6 +968,107 @@ func createConfigYaml(beadsDir string, noDbMode bool) error {
 
 	if err := os.WriteFile(configYamlPath, []byte(configYamlTemplate), 0600); err != nil {
 		return fmt.Errorf("failed to write config.yaml: %w", err)
+	}
+
+	return nil
+}
+
+// createReadme creates the README.md file in the .beads directory
+func createReadme(beadsDir string) error {
+	readmePath := filepath.Join(beadsDir, "README.md")
+
+	// Skip if already exists
+	if _, err := os.Stat(readmePath); err == nil {
+		return nil
+	}
+
+	readmeTemplate := `# Beads - AI-Native Issue Tracking
+
+Welcome to Beads! This repository uses **Beads** for issue tracking - a modern, AI-native tool designed to live directly in your codebase alongside your code.
+
+## What is Beads?
+
+Beads is issue tracking that lives in your repo, making it perfect for AI coding agents and developers who want their issues close to their code. No web UI required - everything works through the CLI and integrates seamlessly with git.
+
+**Learn more:** [github.com/steveyegge/beads](https://github.com/steveyegge/beads)
+
+## Quick Start
+
+### Essential Commands
+
+` + "```bash" + `
+# Create new issues
+bd create "Add user authentication"
+
+# View all issues
+bd list
+
+# View issue details
+bd show <issue-id>
+
+# Update issue status
+bd update <issue-id> --status in-progress
+bd update <issue-id> --status done
+
+# Sync with git remote
+bd sync
+` + "```" + `
+
+### Working with Issues
+
+Issues in Beads are:
+- **Git-native**: Stored in ` + "`.beads/issues.jsonl`" + ` and synced like code
+- **AI-friendly**: CLI-first design works perfectly with AI coding agents
+- **Branch-aware**: Issues can follow your branch workflow
+- **Always in sync**: Auto-syncs with your commits
+
+## Why Beads?
+
+✨ **AI-Native Design**
+- Built specifically for AI-assisted development workflows
+- CLI-first interface works seamlessly with AI coding agents
+- No context switching to web UIs
+
+🚀 **Developer Focused**
+- Issues live in your repo, right next to your code
+- Works offline, syncs when you push
+- Fast, lightweight, and stays out of your way
+
+🔧 **Git Integration**
+- Automatic sync with git commits
+- Branch-aware issue tracking
+- Intelligent JSONL merge resolution
+
+## Get Started with Beads
+
+Try Beads in your own projects:
+
+` + "```bash" + `
+# Install Beads
+curl -sSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+
+# Initialize in your repo
+bd init
+
+# Create your first issue
+bd create "Try out Beads"
+` + "```" + `
+
+## Learn More
+
+- **Documentation**: [github.com/steveyegge/beads/docs](https://github.com/steveyegge/beads/tree/main/docs)
+- **Quick Start Guide**: Run ` + "`bd quickstart`" + `
+- **Examples**: [github.com/steveyegge/beads/examples](https://github.com/steveyegge/beads/tree/main/examples)
+
+---
+
+*Beads: Issue tracking that moves at the speed of thought* ⚡
+`
+
+	// Write README.md (0644 is standard for markdown files)
+	// #nosec G306 - README needs to be readable
+	if err := os.WriteFile(readmePath, []byte(readmeTemplate), 0644); err != nil {
+		return fmt.Errorf("failed to write README.md: %w", err)
 	}
 
 	return nil

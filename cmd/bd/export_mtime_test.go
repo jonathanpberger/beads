@@ -1,3 +1,6 @@
+//go:build integration
+// +build integration
+
 package main
 
 import (
@@ -28,7 +31,7 @@ func TestExportUpdatesDatabaseMtime(t *testing.T) {
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 
 	// Create and populate database
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -60,6 +63,14 @@ func TestExportUpdatesDatabaseMtime(t *testing.T) {
 	if err := exportToJSONLWithStore(ctx, store, jsonlPath); err != nil {
 		t.Fatalf("Export failed: %v", err)
 	}
+
+	// Update metadata after export (bd-ymj fix)
+	mockLogger := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
+	}
+	updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
 
 	// Get JSONL mtime
 	jsonlInfo, err := os.Stat(jsonlPath)
@@ -122,7 +133,7 @@ func TestDaemonExportScenario(t *testing.T) {
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 
 	// Create and populate database
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -157,6 +168,14 @@ func TestDaemonExportScenario(t *testing.T) {
 	if err := exportToJSONLWithStore(ctx, store, jsonlPath); err != nil {
 		t.Fatalf("Daemon export failed: %v", err)
 	}
+
+	// Daemon updates metadata after export (bd-ymj fix)
+	mockLogger := daemonLogger{
+		logFunc: func(format string, args ...interface{}) {
+			t.Logf(format, args...)
+		},
+	}
+	updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
 
 	// THIS IS THE FIX: daemon now calls TouchDatabaseFile after export
 	if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
@@ -195,7 +214,7 @@ func TestMultipleExportCycles(t *testing.T) {
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 
 	// Create and populate database
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -228,6 +247,14 @@ func TestMultipleExportCycles(t *testing.T) {
 		if err := exportToJSONLWithStore(ctx, store, jsonlPath); err != nil {
 			t.Fatalf("Cycle %d: Export failed: %v", i, err)
 		}
+
+		// Update metadata after export (bd-ymj fix)
+		mockLogger := daemonLogger{
+			logFunc: func(format string, args ...interface{}) {
+				t.Logf(format, args...)
+			},
+		}
+		updateExportMetadata(ctx, store, jsonlPath, mockLogger, "")
 
 		// Apply fix
 		if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {

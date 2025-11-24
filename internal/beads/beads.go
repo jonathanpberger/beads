@@ -114,8 +114,8 @@ type Storage = storage.Storage
 
 // NewSQLiteStorage opens a bd SQLite database for programmatic access.
 // Most extensions should use this to query ready work and update issue status.
-func NewSQLiteStorage(dbPath string) (Storage, error) {
-	return sqlite.New(dbPath)
+func NewSQLiteStorage(ctx context.Context, dbPath string) (Storage, error) {
+	return sqlite.New(ctx, dbPath)
 }
 
 // FindDatabasePath discovers the bd database path using bd's standard search order:
@@ -222,7 +222,7 @@ func FindBeadsDir() string {
 
 // FindJSONLPath returns the expected JSONL file path for the given database path.
 // It searches for existing *.jsonl files in the database directory and returns
-// the first one found, or defaults to "issues.jsonl".
+// the first one found, or defaults to "beads.jsonl".
 //
 // This function does not create directories or files - it only discovers paths.
 // Use this when you need to know where bd stores its JSONL export.
@@ -346,7 +346,8 @@ func findDatabaseInTree() string {
 // closest to CWD (most relevant) to the furthest (least relevant).
 func FindAllDatabases() []DatabaseInfo {
 	var databases []DatabaseInfo
-	
+	seen := make(map[string]bool) // Track canonical paths to avoid duplicates
+
 	dir, err := os.Getwd()
 	if err != nil {
 		return databases
@@ -359,20 +360,39 @@ func FindAllDatabases() []DatabaseInfo {
 			// Found .beads/ directory, look for *.db files
 			matches, err := filepath.Glob(filepath.Join(beadsDir, "*.db"))
 			if err == nil && len(matches) > 0 {
+				dbPath := matches[0]
+
+				// Resolve symlinks to get canonical path for deduplication
+				canonicalPath := dbPath
+				if resolved, err := filepath.EvalSymlinks(dbPath); err == nil {
+					canonicalPath = resolved
+				}
+
+				// Skip if we've already seen this database (via symlink or other path)
+				if seen[canonicalPath] {
+					// Move up one directory
+					parent := filepath.Dir(dir)
+					if parent == dir {
+						break
+					}
+					dir = parent
+					continue
+				}
+				seen[canonicalPath] = true
+
 				// Count issues if we can open the database (best-effort)
 				issueCount := -1
-				dbPath := matches[0]
 				// Don't fail if we can't open/query the database - it might be locked
 				// or corrupted, but we still want to detect and warn about it
-				store, err := sqlite.New(dbPath)
+				ctx := context.Background()
+				store, err := sqlite.New(ctx, dbPath)
 				if err == nil {
-					ctx := context.Background()
 					if issues, err := store.SearchIssues(ctx, "", types.IssueFilter{}); err == nil {
 						issueCount = len(issues)
 					}
 					_ = store.Close()
 				}
-				
+
 				databases = append(databases, DatabaseInfo{
 					Path:       dbPath,
 					BeadsDir:   beadsDir,

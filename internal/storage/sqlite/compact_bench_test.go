@@ -120,12 +120,13 @@ func generateID(b testing.TB, prefix string, n int) string{
 func setupBenchDB(tb testing.TB) (*SQLiteStorage, func()) {
 	tb.Helper()
 	tmpDB := tb.TempDir() + "/test.db"
-	store, err := New(tmpDB)
+	ctx := context.Background()
+
+	store, err := New(ctx, tmpDB)
 	if err != nil {
 		tb.Fatalf("Failed to create storage: %v", err)
 	}
 
-	ctx := context.Background()
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
 		tb.Fatalf("Failed to set issue_prefix: %v", err)
 	}

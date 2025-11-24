@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,18 +14,28 @@ import (
 
 var detectPollutionCmd = &cobra.Command{
 	Use:   "detect-pollution",
-	Short: "Detect test issues that leaked into production database",
-	Long: `Detect test issues using pattern matching:
-- Titles starting with 'test', 'benchmark', 'sample', 'tmp', 'temp'
-- Sequential numbering (test-1, test-2, ...)
-- Generic descriptions or no description
-- Created in rapid succession
+	Short: "Detect and optionally clean test issues from database",
+	Long: `Detect test issues that leaked into production database using pattern matching.
 
-Example:
+This command finds issues that appear to be test data based on:
+- Titles starting with 'test', 'benchmark', 'sample', 'tmp', 'temp'
+- Sequential numbering patterns (test-1, test-2, ...)
+- Generic or missing descriptions
+- Created in rapid succession (potential script/automation artifacts)
+
+USE CASES:
+- Cleaning up after testing in a production database
+- Identifying accidental test data from CI/automation
+- Database hygiene after development experiments
+- Quality checks before database backups
+
+EXAMPLES:
   bd detect-pollution                 # Show potential test issues
   bd detect-pollution --clean         # Delete test issues (with confirmation)
   bd detect-pollution --clean --yes   # Delete without confirmation
-  bd detect-pollution --json          # Output in JSON format`,
+  bd detect-pollution --json          # Output in JSON format
+
+NOTE: Review detected issues carefully before using --clean. False positives are possible.`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		// Check daemon mode - not supported yet (uses direct storage access)
 		if daemonClient != nil {
@@ -38,7 +47,7 @@ Example:
 		clean, _ := cmd.Flags().GetBool("clean")
 		yes, _ := cmd.Flags().GetBool("yes")
 
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Get all issues
 		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})

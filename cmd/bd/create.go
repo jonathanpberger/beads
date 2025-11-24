@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 var createCmd = &cobra.Command{
@@ -77,9 +77,17 @@ var createCmd = &cobra.Command{
 		}
 
 		// Get field values, preferring explicit flags over template defaults
-		description, _ := cmd.Flags().GetString("description")
+		description, _ := getDescriptionFlag(cmd)
 		if description == "" && tmpl != nil {
 			description = tmpl.Description
+		}
+
+		// Warn if creating an issue without a description (unless it's a test issue)
+		if description == "" && !strings.Contains(strings.ToLower(title), "test") {
+			yellow := color.New(color.FgYellow).SprintFunc()
+			fmt.Fprintf(os.Stderr, "%s Creating issue without description.\n", yellow("⚠"))
+			fmt.Fprintf(os.Stderr, "  Issues without descriptions lack context for future work.\n")
+			fmt.Fprintf(os.Stderr, "  Consider adding --description=\"Why this issue exists and what needs to be done\"\n")
 		}
 
 		design, _ := cmd.Flags().GetString("design")
@@ -94,9 +102,9 @@ var createCmd = &cobra.Command{
 		
 		// Parse priority (supports both "1" and "P1" formats)
 		priorityStr, _ := cmd.Flags().GetString("priority")
-		priority := parsePriority(priorityStr)
-		if priority == -1 {
-			fmt.Fprintf(os.Stderr, "Error: invalid priority %q (expected 0-4 or P0-P4)\n", priorityStr)
+		priority, err := validation.ValidatePriority(priorityStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		if cmd.Flags().Changed("priority") == false && tmpl != nil {
@@ -167,7 +175,17 @@ var createCmd = &cobra.Command{
 		// In daemon mode, the parent will be sent to the RPC handler
 		// In direct mode, we generate the child ID here
 		if parentID != "" && daemonClient == nil {
-			ctx := context.Background()
+			ctx := rootCtx
+			// Validate parent exists before generating child ID
+			parentIssue, err := store.GetIssue(ctx, parentID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to check parent issue: %v\n", err)
+				os.Exit(1)
+			}
+			if parentIssue == nil {
+				fmt.Fprintf(os.Stderr, "Error: parent issue %s not found\n", parentID)
+				os.Exit(1)
+			}
 			childID, err := store.GetNextChildID(ctx, parentID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -177,38 +195,29 @@ var createCmd = &cobra.Command{
 		}
 
 		// Validate explicit ID format if provided
-		// Supports: prefix-number (bd-42), prefix-hash (bd-a3f8e9), or hierarchical (bd-a3f8e9.1)
 		if explicitID != "" {
-			// Must contain hyphen
-			if !strings.Contains(explicitID, "-") {
-				fmt.Fprintf(os.Stderr, "Error: invalid ID format '%s' (expected format: prefix-hash or prefix-hash.number, e.g., 'bd-a3f8e9' or 'bd-a3f8e9.1')\n", explicitID)
+			requestedPrefix, err := validation.ValidateIDFormat(explicitID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 
-			// Extract prefix (before the first hyphen)
-			hyphenIdx := strings.Index(explicitID, "-")
-			requestedPrefix := explicitID[:hyphenIdx]
+			// Validate prefix matches database prefix
+			ctx := rootCtx
 
-			// Validate prefix matches database prefix (unless --force is used)
-			if !forceCreate {
-				ctx := context.Background()
+			// Get database prefix from config
+			var dbPrefix string
+			if daemonClient != nil {
+				// TODO(bd-g5p7): Add RPC method to get config in daemon mode
+				// For now, skip validation in daemon mode (needs RPC enhancement)
+			} else {
+				// Direct mode - check config
+				dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
+			}
 
-				// Get database prefix from config
-				var dbPrefix string
-				if daemonClient != nil {
-					// Using daemon - need to get config via RPC
-					// For now, skip validation in daemon mode (needs RPC enhancement)
-				} else {
-					// Direct mode - check config
-					dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
-				}
-
-				if dbPrefix != "" && dbPrefix != requestedPrefix {
-					fmt.Fprintf(os.Stderr, "Error: prefix mismatch detected\n")
-					fmt.Fprintf(os.Stderr, "  This database uses prefix '%s', but you specified '%s'\n", dbPrefix, requestedPrefix)
-					fmt.Fprintf(os.Stderr, "  Use --force to create with mismatched prefix anyway\n")
-					os.Exit(1)
-				}
+			if err := validation.ValidatePrefix(requestedPrefix, dbPrefix, forceCreate); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
 			}
 		}
 
@@ -271,7 +280,7 @@ var createCmd = &cobra.Command{
 			ExternalRef:        externalRefPtr,
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 		
 		// Check if any dependencies are discovered-from type
 		// If so, inherit source_repo from the parent issue
@@ -291,7 +300,7 @@ var createCmd = &cobra.Command{
 					depType = types.DependencyType(strings.TrimSpace(parts[0]))
 					dependsOnID = strings.TrimSpace(parts[1])
 					
-					if depType == types.DepDiscoveredFrom {
+					if depType == types.DepDiscoveredFrom && dependsOnID != "" {
 						discoveredFromParentID = dependsOnID
 						break
 					}
@@ -394,18 +403,14 @@ func init() {
 	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
 	createCmd.Flags().String("from-template", "", "Create issue from template (e.g., 'epic', 'bug', 'feature')")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
-	createCmd.Flags().StringP("description", "d", "", "Issue description")
-	createCmd.Flags().String("design", "", "Design notes")
-	createCmd.Flags().String("acceptance", "", "Acceptance criteria")
-	createCmd.Flags().StringP("priority", "p", "2", "Priority (0-4 or P0-P4, 0=highest)")
+	registerPriorityFlag(createCmd, "2")
 	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore)")
-	createCmd.Flags().StringP("assignee", "a", "", "Assignee")
+	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")
 	createCmd.Flags().StringSlice("label", []string{}, "Alias for --labels")
 	_ = createCmd.Flags().MarkHidden("label")
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
-	createCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
 	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	createCmd.Flags().String("repo", "", "Target repository for issue (overrides auto-routing)")

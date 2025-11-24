@@ -7,7 +7,7 @@ import subprocess
 import sys
 from contextvars import ContextVar
 from functools import lru_cache
-from typing import Annotated, TYPE_CHECKING
+from typing import Annotated, Any, TYPE_CHECKING
 
 from .bd_client import create_bd_client, BdClientBase, BdError
 
@@ -362,6 +362,13 @@ async def beads_create_issue(
 ) -> Issue:
     """Create a new issue.
 
+    IMPORTANT: Always provide a meaningful description with context about:
+    - Why this issue exists (problem statement or need)
+    - What needs to be done (scope and approach)
+    - How you discovered it (if applicable)
+
+    Issues without descriptions lack context for future work and make prioritization difficult.
+
     Use this when you discover new work during your session.
     Link it back with beads_add_dependency using 'discovered-from' type.
     """
@@ -516,7 +523,7 @@ async def beads_blocked() -> list[BlockedIssue]:
     return await client.blocked()
 
 
-async def beads_inspect_migration() -> dict:
+async def beads_inspect_migration() -> dict[str, Any]:
     """Get migration plan and database state for agent analysis.
     
     AI agents should:
@@ -531,7 +538,7 @@ async def beads_inspect_migration() -> dict:
     return await client.inspect_migration()
 
 
-async def beads_get_schema_info() -> dict:
+async def beads_get_schema_info() -> dict[str, Any]:
     """Get current database schema for inspection.
     
     Returns tables, schema version, config, sample issue IDs, and detected prefix.
@@ -543,7 +550,7 @@ async def beads_get_schema_info() -> dict:
 
 async def beads_repair_deps(
     fix: Annotated[bool, "If True, automatically remove orphaned dependencies"] = False,
-) -> dict:
+) -> dict[str, Any]:
     """Find and optionally fix orphaned dependency references.
     
     Scans all issues for dependencies pointing to non-existent issues.
@@ -560,7 +567,7 @@ async def beads_repair_deps(
 
 async def beads_detect_pollution(
     clean: Annotated[bool, "If True, delete detected test issues"] = False,
-) -> dict:
+) -> dict[str, Any]:
     """Detect test issues that leaked into production database.
     
     Detects test issues using pattern matching:
@@ -578,7 +585,7 @@ async def beads_detect_pollution(
 async def beads_validate(
     checks: Annotated[str | None, "Comma-separated list of checks (orphans,duplicates,pollution,conflicts)"] = None,
     fix_all: Annotated[bool, "If True, auto-fix all fixable issues"] = False,
-) -> dict:
+) -> dict[str, Any]:
     """Run comprehensive database health checks.
     
     Available checks:

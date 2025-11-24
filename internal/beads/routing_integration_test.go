@@ -1,3 +1,6 @@
+//go:build integration
+// +build integration
+
 package beads_test
 
 import (
@@ -14,6 +17,10 @@ import (
 )
 
 func TestRoutingIntegration(t *testing.T) {
+	// Isolate from user's git config (e.g. url.insteadOf) to ensure deterministic URLs
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
 	tests := []struct {
 		name               string
 		setupGit           func(t *testing.T, dir string)
@@ -135,7 +142,7 @@ func TestMultiRepoEndToEnd(t *testing.T) {
 
 	// Initialize database
 	dbPath := filepath.Join(beadsDir, "beads.db")
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
 	}

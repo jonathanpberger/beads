@@ -7,6 +7,375 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Improved
+
+- **Daemon Log Rotation**: Increased default rotation limits for better production use (bd-t7ds)
+  - Max size increased from 10MB to 50MB per file
+  - Max backups increased from 3 to 7 files
+  - Max age increased from 7 to 30 days
+  - Added comprehensive documentation in CONFIG.md
+  - Better handles long-running daemons with high log output
+
+- **Git Pre-Push Hook**: Better error messaging and auto-sync option
+  - Error message now suggests `bd sync` instead of manual git commands
+  - Interactive prompt offers to run `bd sync` automatically
+  - Falls back to manual instructions in non-interactive terminals or when bd is unavailable
+  - Improves user experience when beads JSONL has uncommitted changes
+
+## [0.24.2] - 2025-11-22
+
+### Fixed
+
+- **Test Stability**: Complete rootCtx initialization fix for all hanging tests (issue #355, b8db5ab)
+  - Fixed TestGetAssignedStatus missing rootCtx initialization (a517ec9)
+  - Prevents test hangs from uninitialized context
+  - Improved test reliability and isolation
+
+- **JSONL Configuration**: Improved bd doctor JSONL checks to focus on real problems (87ee3a6)
+  - Reduces false positives in JSONL validation
+  - Better detection of actual configuration issues
+
+### Changed
+
+- **JSONL Filename Default**: Changed default JSONL filename from `beads.jsonl` to `issues.jsonl` (c4c5c80)
+  - Updated TestFindJSONLPathDefault to match new default (5eefec7)
+  - Removed stale `issues.jsonl` in favor of configured `beads.jsonl` (d918e47)
+  - More intuitive default filename for new users
+
+## [0.24.1] - 2025-11-22
+
+### Added
+
+- **bd search**: Date and priority filters (787fb4e)
+  - `--created-after`, `--created-before` for date filtering
+  - `--priority-min`, `--priority-max` for priority range filtering
+  - Enables more precise search queries
+
+- **bd count**: New command for counting and grouping issues (d7f4189)
+  - Count issues by status, priority, type, or labels
+  - Helpful for generating statistics and reports
+
+- **Test Infrastructure**: Automatic skip list for tests (0040e80)
+  - Improves test reliability and maintenance
+  - Automatically manages flaky or environment-specific tests
+
+### Fixed
+
+- **Test Stability**: Fixed hanging tests by initializing rootCtx (822baa0, bd-n25)
+  - Prevents test hangs from context cancellation issues
+  - Better test isolation and cleanup
+
+- **Git Merge Driver**: Corrected placeholders from %L/%R to %A/%B (ddd209e)
+  - Fixes merge driver configuration for proper conflict resolution
+  - Uses correct git merge driver variable names
+
+- **Database Paths**: Deduplicate database paths when symlinks present (#354, f724b61)
+  - Prevents duplicate database detection when symlinks are involved
+  - Improves reliability in complex filesystem setups
+
+### Changed
+
+- **bd list**: Accept both integer and P-format for priority flags (2e2b8d7)
+  - `--priority 1` and `--priority P1` now both work
+  - More flexible CLI input for priority filtering
+
+- **bd update**: Added `--body` flag as alias for `--description` (bb5a480)
+  - More intuitive flag name for updating issue descriptions
+  - Both flags work identically for backward compatibility
+
+- **bd update**: Added label operations (3065db2)
+  - `--add-labels` and `--remove-labels` flags
+  - Simplifies label management in update operations
+
+- **GitHub Copilot Support**: Added `.github/copilot-instructions.md` (605fff1)
+  - Provides project-specific guidance for GitHub Copilot
+  - Improves AI-assisted development experience
+
+- **Documentation**: Moved design/audit docs from cmd/bd to docs/ (ce433bb)
+  - Better organization of project documentation
+  - Clearer separation of code and documentation
+
+### Performance
+
+- **Test Suite**: Deleted 7 redundant tests from main_test.go (fa727c7)
+  - 3x speedup in test execution
+  - Improved CI/CD performance
+
+- **Test Coverage**: Tagged 16 slow integration tests with build tags (8290243)
+  - Faster local test runs with `-short` flag
+  - CI can still run full test suite
+
+### Testing
+
+- **Security Tests**: Added security and error handling tests for lint warnings (74f3844)
+  - Improved code quality and safety
+  - Better coverage of edge cases
+
+- **Shared Database Pattern**: Refactored multiple test files to use shared DB pattern (bd-1rh)
+  - compact_test.go, integrity_test.go, validate_test.go, epic_test.go, duplicates_test.go
+  - Improved test consistency and maintainability
+  - Faster test execution through better resource sharing
+
+## [0.24.0] - 2025-11-20
+
+### Added
+
+- **bd doctor --fix**: Automatic repair functionality (bd-ykd9, 7806937)
+  - Automatically fixes issues detected by `bd doctor`
+  - Repairs common database inconsistencies without manual intervention
+
+- **bd clean**: Remove temporary merge artifacts (e8355c2)
+  - Cleans up `.base`, `.ours`, `.theirs` snapshot files
+  - Helps maintain clean `.beads/` directory after merges
+
+- **bd cleanup**: Enhanced bulk deletion command
+  - Delete multiple closed issues efficiently
+  - Improved from previous versions with better performance
+
+- **.beads/README.md Generation**: Auto-generated during `bd init` (bd-m7ge, e1c8853)
+  - Provides project-specific beads documentation
+  - Helps new contributors understand the setup
+
+- **blocked_issues_cache Table**: Performance optimization for GetReadyWork (62c1f42, ed23f8f)
+  - Caches blocked issue relationships
+  - Dramatically improves `bd ready` performance on large databases
+
+- **Commit Hash in Version Output**: Enhanced version reporting (bd-hpt5, 7c96142)
+  - `bd version` now shows git commit hash
+  - Helps identify exact build for debugging
+
+- **Auto-detection of Issue Prefix**: Scans git history to detect prefix (#277, 8f37904)
+  - Automatically discovers project's issue prefix
+  - Reduces manual configuration needed
+
+- **external_ref Support in Daemon RPC**: Full daemon mode support (#304, 57b6ea6)
+  - MCP server can now set external references in daemon mode
+  - Parity with CLI functionality
+
+- **Context Optimization Features**: AI agent improvements (#297, f7e80dd)
+  - Context propagation with graceful cancellation (bd-rtp, bd-yb8, bd-2o2, 57253f9)
+  - Better memory management for long-running agent sessions
+
+### Fixed
+
+- **Critical: Auto-import Resurrection Bug** (bd-khnb, 0020eb4, e28e3ea, 7b6370f)
+  - Fixed critical bug where deleted issues were resurrected during auto-import
+  - Cleaned up 497+ resurrected issues from production database
+  - Prevents data corruption from improper JSONL replay
+
+- **Critical: bd sync Auto-resolves Conflicts** (bd-ca0b, a1e5075)
+  - `bd sync` now automatically resolves conflicts instead of failing
+  - Dramatically improves multi-agent workflow reliability
+  - Eliminates manual conflict resolution in most cases
+
+- **Critical: Content-based Timestamp Skew Prevention** (bd-lm2q, d0e7047)
+  - Fixed false-positive "JSONL is newer than database" warnings
+  - Uses content-based comparison instead of timestamp-only
+  - Prevents unnecessary imports that would corrupt state
+
+- **Critical: bd sync DB Changes After Import** (81c741b)
+  - Ensures database changes are properly applied after import
+  - Fixes desync issues between JSONL and database
+
+- **Critical: Context Propagation Lifecycle Bugs** (bd-rtp, bd-yb8, bd-2o2, 57253f9, a17e4af)
+  - Fixed multiple context propagation issues causing crashes
+  - Graceful cancellation support for long-running operations
+  - Improved stability for AI agent workflows
+
+- **Critical: Race Condition in Auto-flush** (bd-52, a9b2f9f)
+  - Fixed race condition in auto-flush mechanism
+  - Prevents data loss during concurrent operations
+
+- **Critical: Resource Leaks and Error Handling** (#327, fb65163)
+  - Fixed critical resource leaks in daemon mode
+  - Improved error handling throughout codebase
+
+- **Critical: In-memory Database Deadlock** (bd-yvlc, 944ed10)
+  - Fixed deadlock in migrations when using in-memory database
+  - Improves test reliability
+
+- **MCP Schema Generation Recursion Bug** (GH#346, f3a678f)
+  - Fixed infinite recursion in MCP schema generation
+  - Prevents stack overflow crashes
+
+- **FK Constraint Failures** (bd-5arw, 345766b)
+  - Fixed foreign key constraint failures in AddComment and ApplyCompaction
+  - Improved data integrity
+
+- **--parent Flag Behavior** (b9919fe)
+  - Now correctly creates parent-child dependency relationships
+  - Previously was creating wrong dependency type
+
+- **Exact ID Matching Priority** (gh-316, 934ae04)
+  - Prefers exact ID matches over prefix matches
+  - Prevents ambiguous ID resolution
+
+- **Daemon Lifetime on macOS** (GH#278, 68f9bef)
+  - Fixed daemon exiting after 5s on macOS due to PID 1 parent monitoring
+  - Daemon now runs reliably on macOS
+
+- **Daemon Export/JSONL Sync** (GH#301, #321, 04a1996)
+  - Fixed daemon export leaving JSONL newer than database
+  - Ensures proper sync between export and database state
+
+- **bd doctor Hash ID Detection** (GH#322, 8c1f865)
+  - Fixed doctor incorrectly diagnosing hash IDs as sequential
+  - Improved detection logic for ID format validation
+
+- **ResolvePartialID Handling** (GH#336, 4432af0)
+  - Improved ResolvePartialID / ResolveID handling for `bd show`
+  - Better partial ID matching and error messages
+
+- **bd sync Windows Upstream Detection** (#281, 1deaad1)
+  - Fixed upstream branch detection on Windows
+  - Improved cross-platform compatibility
+
+- **Compact Command Daemon Mode** (#294, d9904a8)
+  - Fixed compact command failing with 'SQLite DB needed' error when daemon running
+  - Removed premature store check, uses ensureDirectMode
+
+- **DB mtime Update After Import** (#296, 9dff345)
+  - Fixed DB mtime not being updated after import with 0 changes
+  - Prevents false staleness warnings
+
+- **FOREIGN KEY Constraint on Non-existent Issues** (09666b4)
+  - Fixed constraint failures when operating on non-existent issues
+  - Better error handling and validation
+
+- **Monitor WebUI Daemon Detection** (e36baee)
+  - Fixed monitor-webui failure to detect running daemon
+  - Improved daemon health checking
+
+- **Onboard Test Deadlock on Windows** (4e22214)
+  - Fixed deadlock in onboard tests on Windows
+  - Improved test stability
+
+- **Windows Concurrent Issue Creation** (4cd26c8)
+  - Fixed concurrent issue creation failures on Windows
+  - Better file locking on Windows
+
+- **Missing Git Hook Message** (#306, 92f3af5)
+  - Improved messaging when git hooks are missing
+  - Clearer instructions for users
+
+- **Prefix Detection for Hyphenated Apps** (83472ac, bd-fasa)
+  - Fixed prefix detection to only use first hyphen
+  - Handles hyphenated application names correctly
+
+- **External Ref Migration Failures** (8be792a)
+  - Fixed external_ref migration failure on old databases
+  - Backward compatibility improvements
+
+- **Duplicate Function Declaration** (#328, 167ab67)
+  - Fixed compilation failure from duplicate computeJSONLHash declaration
+  - Removed old version, kept simpler implementation
+  - Updated test to match new API
+
+### Changed
+
+- **Performance Improvements** (#319, 690c73f):
+  - Optimized GetReadyWork to use blocked_issues_cache (ed23f8f)
+  - Replaced N+1 label queries with bulk fetch in `bd list` (968d9e2)
+  - Cache invalidation for blocked_issues_cache (614ba8a)
+  - Significant speedup for large databases
+
+- **FlushManager Improvements** (445857f)
+  - Added constants for magic numbers
+  - Enhanced error logging
+  - Comprehensive functional tests
+
+- **Auto-upgrade .beads/.gitignore** (#300, f4a2f87)
+  - Automatically upgrades .gitignore on bd operations
+  - Ensures latest patterns are always applied
+
+- **Code Refactoring**:
+  - Extract duplicated validation logic to internal/validation (d5239ee)
+  - Centralize error handling patterns in storage layer (bd-bwk2, 3b2cac4)
+  - Extract duplicated validation and flag logic (bd-g5p7, bbfedb0)
+  - Improved code organization and maintainability
+
+- **Documentation Improvements**:
+  - Document files created by bd init and clarify .gitattributes (721274b, e7fd1dd)
+  - How to resolve merge conflicts in .beads/beads.jsonl (4985a68)
+  - Document MCP tools loading issue in Claude Code (GH#346, 79b8dbe)
+  - Add uv prerequisite to Claude Code plugin docs (#293, a020c6c)
+  - Don't auto-install Go in Windows installer (#302, 0cba73b)
+
+- **Improved Error Messages** (#349, 27c0c33)
+  - Compact error messages
+  - Remove bogus merge suggestion
+  - Add daemon/maintenance docs
+
+- **AGENTS.md Refactoring** (21a0656)
+  - Extracted detailed instructions to prevent context pollution
+  - Better organization for AI agent consumption
+
+- **Type Safety Improvements** (9e57cb6)
+  - Improved type safety in beads-mcp
+  - Fixed minor type issues
+
+- **Test Improvements**:
+  - Fix CI regressions and stabilize tests (7b63b5a)
+  - Fix parallel test deadlock (1fc9bf6)
+  - Annotate gosec-safe file accesses (bf9b2c8)
+
+- **Local-only Git Repo Support** (bd-biwp, 4de9f01)
+  - Support repositories without remote origin
+  - Better handling of local development workflows
+
+- **Version Marker in Post-checkout Hook** (ad2154b)
+  - Add version marker to post-checkout hook
+  - Include in CheckGitHooks for better version tracking
+
+### Performance
+
+- **GetReadyWork Optimization** (bd-5qim, 690c73f, 62c1f42, ed23f8f)
+  - Introduced blocked_issues_cache table
+  - Eliminated expensive recursive queries
+  - Dramatically faster for large dependency graphs
+
+- **bd list N+1 Query Elimination** (968d9e2)
+  - Replaced per-issue label queries with bulk fetch
+  - Significant speedup when listing many labeled issues
+
+### Community
+
+- **Pull Requests**:
+  - #338: Prevent daemon from exiting when launcher process exits (@cpdata)
+  - #337: Improve ResolvePartialID handling (@cpdata)
+  - #333: Fix doctor incorrectly diagnosing hash IDs (@cpdata)
+  - #327: Address critical resource leaks and error handling
+  - #306: Improve missing git hook message
+  - #304: Add external_ref support to daemon mode RPC
+  - #302: Windows installer improvements
+  - #300: Automatic .beads/.gitignore upgrade
+  - #297: Context optimization features for AI agents
+  - #296: Fix DB mtime update after import
+  - #294: Fix compact command in daemon mode
+  - #293: Add uv prerequisite documentation
+  - #281: Fix bd sync Windows upstream detection
+  - #277: Auto-detection of issue prefix from git history
+
+- **Dependency Updates**:
+  - Bump github.com/anthropics/anthropic-sdk-go from 1.17.0 to 1.18.0 (#330)
+  - Bump golang.org/x/mod from 0.29.0 to 0.30.0 (#331)
+  - Bump fastmcp from 2.13.0.2 to 2.13.1 (#332)
+  - Bump pydantic from 2.12.0 to 2.12.4 (#285)
+  - Bump pydantic-settings from 2.11.0 to 2.12.0 (#286)
+  - Bump golangci/golangci-lint-action from 8 to 9 (#287)
+  - Bump golang.org/x/sys from 0.36.0 to 0.38.0 (#288)
+  - Bump github.com/ncruces/go-sqlite3 from 0.29.1 to 0.30.1 (#290)
+  - Bump github.com/google/go-cmp from 0.6.0 to 0.7.0 (#291)
+
+### Notes
+
+This release represents a major stability and performance improvement with **179 commits** since 0.23.1. Key themes:
+- **Reliability**: Fixed critical auto-import resurrection bug and multiple daemon issues
+- **Performance**: Significant optimizations for `bd ready` and `bd list`
+- **AI Agent Support**: Improved context propagation and error handling
+- **Cross-platform**: Better Windows and macOS support
+- **Developer Experience**: Auto-detection, better error messages, improved docs
+
 ## [0.23.1] - 2025-11-08
 
 ### Fixed
@@ -871,9 +1240,9 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - Includes comprehensive test coverage
 - **Log Rotation**: Automatic daemon log rotation with configurable limits (bd-154)
   - Prevents unbounded log file growth for long-running daemons
-  - Configurable via environment variables: `BEADS_DAEMON_LOG_MAX_SIZE`, `BEADS_DAEMON_LOG_MAX_BACKUPS`, `BEADS_DAEMON_LOG_MAX_AGE`
+  - Configurable via environment variables: `BEADS_DAEMON_LOG_MAX_SIZE`, `BEADS_DAEMON_LOG_MAX_BACKUPS`, `BEADS_DAEMON_LOG_MAX_AGE`, `BEADS_DAEMON_LOG_COMPRESS`
   - Optional compression of rotated logs
-  - Defaults: 10MB max size, 3 backups, 7 day retention, compression enabled
+  - Defaults: 50MB max size, 7 backups, 30 day retention, compression enabled
 - **Batch Deletion**: Enhanced `bd delete` command with batch operations (bd-127)
   - Delete multiple issues at once: `bd delete bd-1 bd-2 bd-3 --force`
   - Read from file: `bd delete --from-file deletions.txt --force`

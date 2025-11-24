@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -252,6 +254,10 @@ func TestAddCommentUpdatesTimestamp(t *testing.T) {
 
 	originalUpdatedAt := issue.UpdatedAt
 
+	// Sleep briefly to ensure timestamp difference on systems with low time resolution (e.g., Windows)
+	// This prevents flaky test failures when both operations complete in the same millisecond
+	time.Sleep(2 * time.Millisecond)
+
 	// Add comment
 	err = store.AddComment(ctx, issue.ID, "alice", "Test comment")
 	if err != nil {
@@ -337,5 +343,23 @@ func TestEventTypesInHistory(t *testing.T) {
 	}
 	if !eventTypes[types.EventClosed] {
 		t.Error("Expected EventClosed in history")
+	}
+}
+
+func TestAddCommentNotFound(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	nonExistentID := "bd-999"
+
+	err := store.AddComment(ctx, nonExistentID, "alice", "This should fail cleanly")
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
+
+	expectedError := "issue bd-999 not found"
+	if !strings.Contains(err.Error(), expectedError) {
+		t.Errorf("Expected error to contain %q, got %q", expectedError, err.Error())
 	}
 }

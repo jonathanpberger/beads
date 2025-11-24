@@ -90,12 +90,12 @@ func getCachedOrGenerateDB(b *testing.B, cacheKey string, generateFn func(contex
 	b.Logf("This is a one-time operation that will be cached for future runs...")
 	b.Logf("Expected time: ~1-3 minutes for 10K issues, ~2-6 minutes for 20K issues")
 
-	store, err := New(dbPath)
+	ctx := context.Background()
+
+	store, err := New(ctx, dbPath)
 	if err != nil {
 		b.Fatalf("Failed to create storage: %v", err)
 	}
-
-	ctx := context.Background()
 
 	// Initialize database with prefix
 	if err := store.SetConfig(ctx, "issue_prefix", "bd-"); err != nil {
@@ -165,7 +165,9 @@ func setupLargeBenchDB(b *testing.B) (*SQLiteStorage, func()) {
 	}
 
 	// Open the temporary copy
-	store, err := New(tmpPath)
+	ctx := context.Background()
+
+	store, err := New(ctx, tmpPath)
 	if err != nil {
 		b.Fatalf("Failed to open database: %v", err)
 	}
@@ -198,7 +200,9 @@ func setupXLargeBenchDB(b *testing.B) (*SQLiteStorage, func()) {
 	}
 
 	// Open the temporary copy
-	store, err := New(tmpPath)
+	ctx := context.Background()
+
+	store, err := New(ctx, tmpPath)
 	if err != nil {
 		b.Fatalf("Failed to open database: %v", err)
 	}
@@ -234,7 +238,9 @@ func setupLargeFromJSONL(b *testing.B) (*SQLiteStorage, func()) {
 	}
 
 	// Open the temporary copy
-	store, err := New(tmpPath)
+	ctx := context.Background()
+
+	store, err := New(ctx, tmpPath)
 	if err != nil {
 		b.Fatalf("Failed to open database: %v", err)
 	}

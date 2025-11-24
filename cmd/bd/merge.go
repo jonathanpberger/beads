@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/merge"
@@ -23,9 +26,9 @@ markers for unresolvable conflicts.
 
 Designed to work as a git merge driver. Configure with:
 
-  git config merge.beads.driver "bd merge %A %O %L %R"
+  git config merge.beads.driver "bd merge %A %O %A %B"
   git config merge.beads.name "bd JSONL merge driver"
-  echo ".beads/beads.jsonl merge=beads" >> .gitattributes
+  echo ".beads/issues.jsonl merge=beads" >> .gitattributes
 
 Or use 'bd init' which automatically configures the merge driver.
 
@@ -45,10 +48,35 @@ Vendored into bd with permission.`,
 		leftPath := args[2]
 		rightPath := args[3]
 
+		// Log arguments for debugging
+		if debugMerge {
+			fmt.Fprintf(os.Stderr, "=== MERGE DRIVER INVOKED ===\n")
+			fmt.Fprintf(os.Stderr, "Arguments received:\n")
+			fmt.Fprintf(os.Stderr, "  %%A (output): %q\n", outputPath)
+			fmt.Fprintf(os.Stderr, "  %%O (base):   %q\n", basePath)
+			fmt.Fprintf(os.Stderr, "  %%L (left):   %q\n", leftPath)
+			fmt.Fprintf(os.Stderr, "  %%R (right):  %q\n", rightPath)
+			fmt.Fprintf(os.Stderr, "\nFile existence check:\n")
+			for i, path := range []string{outputPath, basePath, leftPath, rightPath} {
+				label := []string{"%%A (output)", "%%O (base)", "%%L (left)", "%%R (right)"}[i]
+				if _, err := os.Stat(path); err == nil {
+					fmt.Fprintf(os.Stderr, "  %s: EXISTS\n", label)
+				} else {
+					fmt.Fprintf(os.Stderr, "  %s: NOT FOUND - %v\n", label, err)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "\n")
+		}
+
+		// Ensure cleanup runs after merge completes
+		defer func() {
+			cleanupMergeArtifacts(outputPath, debugMerge)
+		}()
+
 		err := merge.Merge3Way(outputPath, basePath, leftPath, rightPath, debugMerge)
 		if err != nil {
 			// Check if error is due to conflicts
-			if err.Error() == fmt.Sprintf("merge completed with %d conflicts", 1) || 
+			if err.Error() == fmt.Sprintf("merge completed with %d conflicts", 1) ||
 			   err.Error() == fmt.Sprintf("merge completed with %d conflicts", 2) ||
 			   err.Error()[:len("merge completed with")] == "merge completed with" {
 				// Conflicts present - exit with 1 (standard for merge drivers)
@@ -61,6 +89,64 @@ Vendored into bd with permission.`,
 		// Success - exit with 0
 		os.Exit(0)
 	},
+}
+
+func cleanupMergeArtifacts(outputPath string, debug bool) {
+	// Determine the .beads directory from the output path
+	// outputPath is typically .beads/beads.jsonl
+	beadsDir := filepath.Dir(outputPath)
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "=== CLEANUP ===\n")
+		fmt.Fprintf(os.Stderr, "Cleaning up artifacts in: %s\n", beadsDir)
+	}
+
+	// 1. Find and remove any files with "backup" in the name
+	entries, err := os.ReadDir(beadsDir)
+	if err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "Warning: failed to read directory for cleanup: %v\n", err)
+		}
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if strings.Contains(strings.ToLower(entry.Name()), "backup") {
+			fullPath := filepath.Join(beadsDir, entry.Name())
+
+			// Try to git rm if tracked
+			// #nosec G204 -- fullPath is safely constructed via filepath.Join from entry.Name()
+			// from os.ReadDir. exec.Command does NOT use shell interpretation - arguments
+			// are passed directly to git binary. See TestCleanupMergeArtifacts_CommandInjectionPrevention
+			gitRmCmd := exec.Command("git", "rm", "-f", "--quiet", fullPath)
+			gitRmCmd.Dir = filepath.Dir(beadsDir)
+			_ = gitRmCmd.Run() // Ignore errors, file may not be tracked
+
+			// Also remove from filesystem if git rm didn't work
+			if err := os.Remove(fullPath); err == nil {
+				if debug {
+					fmt.Fprintf(os.Stderr, "Removed backup file: %s\n", entry.Name())
+				}
+			}
+		}
+	}
+
+	// 2. Run git clean -f in .beads/ directory to remove untracked files
+	cleanCmd := exec.Command("git", "clean", "-f")
+	cleanCmd.Dir = beadsDir
+	if debug {
+		cleanCmd.Stderr = os.Stderr
+		cleanCmd.Stdout = os.Stderr
+		fmt.Fprintf(os.Stderr, "Running: git clean -f in %s\n", beadsDir)
+	}
+	_ = cleanCmd.Run() // Ignore errors, git clean may fail in some contexts
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "Cleanup complete\n\n")
+	}
 }
 
 func init() {

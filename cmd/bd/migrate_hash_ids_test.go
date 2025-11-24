@@ -16,7 +16,7 @@ func TestMigrateHashIDs(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 
 	// Create test database with sequential IDs
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestMigrateHashIDs(t *testing.T) {
 	store.Close()
 
 	// Test dry run
-	store, err = sqlite.New(dbPath)
+	store, err = sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to reopen database: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestMigrateHashIDs(t *testing.T) {
 	store.Close()
 
 	// Test actual migration
-	store, err = sqlite.New(dbPath)
+	store, err = sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to reopen database: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestMigrateHashIDsWithParentChild(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 
 	// Create test database
-	store, err := sqlite.New(dbPath)
+	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -262,7 +262,6 @@ func TestIsHashID(t *testing.T) {
 		{"bd-123abc", true},
 		{"bd-a3f8e9a2.1", true},
 		{"bd-a3f8e9a2.1.2", true},
-		
 		// Hash IDs that are numeric but 5+ characters (likely hash)
 		{"bd-12345", true},
 		{"bd-0088", false}, // 4 chars, all numeric - ambiguous, defaults to false
@@ -278,6 +277,15 @@ func TestIsHashID(t *testing.T) {
 		{"bd-", false},     // Empty suffix
 		{"invalid", false}, // No dash
 		{"bd-0", false},    // Single digit
+
+        // Hyphenated prefixes
+		{"bd-beads-1", false},
+		{"bd-beads-123", false},
+		{"bd-beads-a3f8e9a2", true},
+		{"bd-beads-abc123", true},
+		{"bd-beads-123abc", true},
+		{"bd-beads-a3f8e9a2.1", true},
+		{"bd-beads-a3f8e9a2.1.2", true},
 	}
 
 	for _, tt := range tests {

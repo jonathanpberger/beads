@@ -183,16 +183,6 @@ func tryResurrectParent(parentID string, issues []*types.Issue) bool {
 	return false // Parent not in this batch
 }
 
-// OrphanHandling defines how to handle missing parent issues during import
-type OrphanHandling string
-
-const (
-	OrphanStrict     OrphanHandling = "strict"     // Fail import on missing parent
-	OrphanResurrect  OrphanHandling = "resurrect"  // Auto-resurrect from batch
-	OrphanSkip       OrphanHandling = "skip"       // Skip orphaned issues
-	OrphanAllow      OrphanHandling = "allow"      // Allow orphans (default)
-)
-
 // EnsureIDs generates or validates IDs for issues
 // For issues with empty IDs, generates unique hash-based IDs
 // For issues with existing IDs, validates they match the prefix and parent exists (if hierarchical)
@@ -205,7 +195,7 @@ func EnsureIDs(ctx context.Context, conn *sql.Conn, prefix string, issues []*typ
 		if issues[i].ID != "" {
 			// Validate that explicitly provided ID matches the configured prefix (bd-177)
 			if err := ValidateIssueIDPrefix(issues[i].ID, prefix); err != nil {
-				return err
+				return wrapDBErrorf(err, "validate ID prefix for %s", issues[i].ID)
 			}
 			
 			// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists

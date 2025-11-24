@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 var showCmd = &cobra.Command{
@@ -21,7 +21,16 @@ var showCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		jsonOutput, _ := cmd.Flags().GetBool("json")
-		ctx := context.Background()
+		ctx := rootCtx
+
+		// Check database freshness before reading (bd-2q6d, bd-c4rq)
+		// Skip check when using daemon (daemon auto-imports on staleness)
+		if daemonClient == nil {
+			if err := ensureDatabaseFresh(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
 
 		// Resolve partial IDs first
 		var resolvedIDs []string
@@ -343,7 +352,12 @@ var updateCmd = &cobra.Command{
 			updates["status"] = status
 		}
 		if cmd.Flags().Changed("priority") {
-			priority, _ := cmd.Flags().GetInt("priority")
+			priorityStr, _ := cmd.Flags().GetString("priority")
+			priority, err := validation.ValidatePriority(priorityStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 			updates["priority"] = priority
 		}
 		if cmd.Flags().Changed("title") {
@@ -354,8 +368,8 @@ var updateCmd = &cobra.Command{
 			assignee, _ := cmd.Flags().GetString("assignee")
 			updates["assignee"] = assignee
 		}
-		if cmd.Flags().Changed("description") {
-			description, _ := cmd.Flags().GetString("description")
+		description, descChanged := getDescriptionFlag(cmd)
+		if descChanged {
 			updates["description"] = description
 		}
 		if cmd.Flags().Changed("design") {
@@ -379,13 +393,25 @@ var updateCmd = &cobra.Command{
 			externalRef, _ := cmd.Flags().GetString("external-ref")
 			updates["external_ref"] = externalRef
 		}
+		if cmd.Flags().Changed("add-label") {
+			addLabels, _ := cmd.Flags().GetStringSlice("add-label")
+			updates["add_labels"] = addLabels
+		}
+		if cmd.Flags().Changed("remove-label") {
+			removeLabels, _ := cmd.Flags().GetStringSlice("remove-label")
+			updates["remove_labels"] = removeLabels
+		}
+		if cmd.Flags().Changed("set-labels") {
+			setLabels, _ := cmd.Flags().GetStringSlice("set-labels")
+			updates["set_labels"] = setLabels
+		}
 
 		if len(updates) == 0 {
 			fmt.Println("No updates specified")
 			return
 		}
 
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Resolve partial IDs first
 		var resolvedIDs []string
@@ -447,6 +473,15 @@ var updateCmd = &cobra.Command{
 				if externalRef, ok := updates["external_ref"].(string); ok { // NEW: Map external_ref
 					updateArgs.ExternalRef = &externalRef
 				}
+				if addLabels, ok := updates["add_labels"].([]string); ok {
+					updateArgs.AddLabels = addLabels
+				}
+				if removeLabels, ok := updates["remove_labels"].([]string); ok {
+					updateArgs.RemoveLabels = removeLabels
+				}
+				if setLabels, ok := updates["set_labels"].([]string); ok {
+					updateArgs.SetLabels = setLabels
+				}
 
 				resp, err := daemonClient.Update(updateArgs)
 				if err != nil {
@@ -474,9 +509,63 @@ var updateCmd = &cobra.Command{
 		// Direct mode
 		updatedIssues := []*types.Issue{}
 		for _, id := range resolvedIDs {
-			if err := store.UpdateIssue(ctx, id, updates, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
-				continue
+			// Apply regular field updates if any
+			regularUpdates := make(map[string]interface{})
+			for k, v := range updates {
+				if k != "add_labels" && k != "remove_labels" && k != "set_labels" {
+					regularUpdates[k] = v
+				}
+			}
+			if len(regularUpdates) > 0 {
+				if err := store.UpdateIssue(ctx, id, regularUpdates, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+					continue
+				}
+			}
+
+			// Handle label operations
+			// Set labels (replaces all existing labels)
+			if setLabels, ok := updates["set_labels"].([]string); ok && len(setLabels) > 0 {
+				// Get current labels
+				currentLabels, err := store.GetLabels(ctx, id)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error getting labels for %s: %v\n", id, err)
+					continue
+				}
+				// Remove all current labels
+				for _, label := range currentLabels {
+					if err := store.RemoveLabel(ctx, id, label, actor); err != nil {
+						fmt.Fprintf(os.Stderr, "Error removing label %s from %s: %v\n", label, id, err)
+						continue
+					}
+				}
+				// Add new labels
+				for _, label := range setLabels {
+					if err := store.AddLabel(ctx, id, label, actor); err != nil {
+						fmt.Fprintf(os.Stderr, "Error setting label %s on %s: %v\n", label, id, err)
+						continue
+					}
+				}
+			}
+
+			// Add labels
+			if addLabels, ok := updates["add_labels"].([]string); ok {
+				for _, label := range addLabels {
+					if err := store.AddLabel(ctx, id, label, actor); err != nil {
+						fmt.Fprintf(os.Stderr, "Error adding label %s to %s: %v\n", label, id, err)
+						continue
+					}
+				}
+			}
+
+			// Remove labels
+			if removeLabels, ok := updates["remove_labels"].([]string); ok {
+				for _, label := range removeLabels {
+					if err := store.RemoveLabel(ctx, id, label, actor); err != nil {
+						fmt.Fprintf(os.Stderr, "Error removing label %s from %s: %v\n", label, id, err)
+						continue
+					}
+				}
 			}
 
 			if jsonOutput {
@@ -517,7 +606,7 @@ Examples:
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		id := args[0]
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Resolve partial ID if in direct mode
 		if daemonClient == nil {
@@ -709,7 +798,7 @@ var closeCmd = &cobra.Command{
 		}
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 
-		ctx := context.Background()
+		ctx := rootCtx
 
 		// Resolve partial IDs first
 		var resolvedIDs []string
@@ -802,16 +891,16 @@ func init() {
 	rootCmd.AddCommand(showCmd)
 
 	updateCmd.Flags().StringP("status", "s", "", "New status")
-	updateCmd.Flags().IntP("priority", "p", 0, "New priority")
+	registerPriorityFlag(updateCmd, "")
 	updateCmd.Flags().String("title", "", "New title")
-	updateCmd.Flags().StringP("assignee", "a", "", "New assignee")
-	updateCmd.Flags().StringP("description", "d", "", "Issue description")
-	updateCmd.Flags().String("design", "", "Design notes")
+	registerCommonIssueFlags(updateCmd)
 	updateCmd.Flags().String("notes", "", "Additional notes")
-	updateCmd.Flags().String("acceptance", "", "Acceptance criteria")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria")
-	updateCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
+	updateCmd.Flags().StringSlice("add-label", nil, "Add labels (repeatable)")
+	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
+	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
+
 	updateCmd.Flags().Bool("json", false, "Output JSON format")
 	rootCmd.AddCommand(updateCmd)
 

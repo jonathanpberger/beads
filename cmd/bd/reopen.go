@@ -1,6 +1,5 @@
 package main
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,7 +18,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 	Run: func(cmd *cobra.Command, args []string) {
 		reason, _ := cmd.Flags().GetString("reason")
 		// Use global jsonOutput set by PersistentPreRun
-		ctx := context.Background()
+		ctx := rootCtx
 		// Resolve partial IDs first
 		var resolvedIDs []string
 		if daemonClient != nil {
@@ -59,7 +58,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 					fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", id, err)
 					continue
 				}
-				// TODO: Add reason as a comment once RPC supports AddComment
+				// TODO(bd-r46): Add reason as a comment once RPC supports AddComment
 				if reason != "" {
 					fmt.Fprintf(os.Stderr, "Warning: reason not supported in daemon mode yet\n")
 				}

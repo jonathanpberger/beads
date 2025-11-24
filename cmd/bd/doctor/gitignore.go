@@ -93,12 +93,25 @@ func CheckGitignore() DoctorCheck {
 // FixGitignore updates .beads/.gitignore to the current template
 func FixGitignore() error {
 	gitignorePath := filepath.Join(".beads", ".gitignore")
-	
-	// Write canonical template
-	// #nosec G306 -- 0600 is appropriate for gitignore
+
+	// If file exists and is read-only, fix permissions first
+	if info, err := os.Stat(gitignorePath); err == nil {
+		if info.Mode().Perm()&0200 == 0 { // No write permission for owner
+			if err := os.Chmod(gitignorePath, 0600); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Write canonical template with secure file permissions
 	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
 		return err
 	}
-	
+
+	// Ensure permissions are set correctly (some systems respect umask)
+	if err := os.Chmod(gitignorePath, 0600); err != nil {
+		return err
+	}
+
 	return nil
 }
